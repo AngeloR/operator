@@ -189,6 +189,8 @@ const AUTO_CODEX_DEDUP_MAX_IDS = 2000;
 const AUTO_CODEX_STREAM_UPDATE_MIN_INTERVAL_MS = 5000;
 const AUTO_CODEX_STREAM_UPDATE_MIN_CHARS = 200;
 const AUTO_CODEX_STREAM_PREVIEW_MAX_CHARS = 4000;
+const AUTO_CODEX_WORKER_RESTART_BASE_DELAY_MS = 1000;
+const AUTO_CODEX_WORKER_RESTART_MAX_DELAY_MS = 30_000;
 const COMMAND_OUTPUT_CAPTURE_LIMIT_CHARS = 200_000;
 
 if (!cfg.homeserverUrl || !cfg.accessToken) {
@@ -1756,16 +1758,9 @@ function cleanupDedupMap(
 }
 
 function markAndCheckDuplicate(
-  dedupeByProject: Map<string, Map<string, number>>,
-  projectKey: string,
+  projectDedup: Map<string, number>,
   eventId: string,
 ): boolean {
-  let projectDedup = dedupeByProject.get(projectKey);
-  if (!projectDedup) {
-    projectDedup = new Map<string, number>();
-    dedupeByProject.set(projectKey, projectDedup);
-  }
-
   const now = Date.now();
   cleanupDedupMap(projectDedup, now);
 
@@ -2172,16 +2167,16 @@ async function runOutboundLoop(
   }
 }
 
-async function runAutoCodexLoop(
+async function runAutoCodexProjectWorker(
   autoCodexRedis: Redis,
-  queueToProject: Map<string, AutoCodexProject>,
+  userQueue: string,
+  autoProject: AutoCodexProject,
 ): Promise<never> {
-  const queueNames = [...queueToProject.keys()];
-  const dedupeByProject = new Map<string, Map<string, number>>();
+  const projectDedup = new Map<string, number>();
 
   while (true) {
     try {
-      const popped = await autoCodexRedis.blpop(queueNames, 5);
+      const popped = await autoCodexRedis.blpop(userQueue, 5);
       if (popped === null || popped.length < 2) {
         continue;
       }
@@ -2189,9 +2184,10 @@ async function runAutoCodexLoop(
       const poppedQueue = popped[0];
       const rawPayload = popped[1];
 
-      const autoProject = queueToProject.get(poppedQueue);
-      if (!autoProject) {
-        console.error(`unknown auto-codex queue key from Redis: ${poppedQueue}`);
+      if (poppedQueue !== userQueue) {
+        console.error(
+          `unexpected auto-codex queue key from Redis: expected ${userQueue}, got ${poppedQueue}`,
+        );
         continue;
       }
 
@@ -2219,7 +2215,7 @@ async function runAutoCodexLoop(
         continue;
       }
 
-      if (markAndCheckDuplicate(dedupeByProject, autoProject.projectKey, envelope.id)) {
+      if (markAndCheckDuplicate(projectDedup, envelope.id)) {
         console.log(
           JSON.stringify({
             ok: true,
@@ -2494,9 +2490,46 @@ async function runAutoCodexLoop(
       }
     } catch (error: unknown) {
       const detail =
-        error instanceof Error ? error.message : "auto-codex loop failed";
-      console.error(`auto-codex loop error: ${detail}`);
+        error instanceof Error ? error.message : "auto-codex worker loop failed";
+      console.error(`auto-codex worker loop error for ${autoProject.projectKey}: ${detail}`);
       await Bun.sleep(1000);
+    }
+  }
+}
+
+async function runAutoCodexProjectSupervisor(
+  redisConfig: RedisConfig,
+  userQueue: string,
+  autoProject: AutoCodexProject,
+  workerClients: Set<Redis>,
+): Promise<never> {
+  let crashCount = 0;
+
+  while (true) {
+    let workerRedis: Redis | null = null;
+    try {
+      workerRedis = await createRedisClient(redisConfig);
+      workerClients.add(workerRedis);
+      crashCount = 0;
+      await runAutoCodexProjectWorker(workerRedis, userQueue, autoProject);
+    } catch (error: unknown) {
+      crashCount += 1;
+      const detail =
+        error instanceof Error ? error.message : "auto-codex worker crashed";
+      const backoffMs = Math.min(
+        AUTO_CODEX_WORKER_RESTART_MAX_DELAY_MS,
+        AUTO_CODEX_WORKER_RESTART_BASE_DELAY_MS *
+          2 ** Math.min(crashCount - 1, 5),
+      );
+      console.error(
+        `auto-codex worker crashed for ${autoProject.projectKey}; restarting in ${backoffMs}ms: ${detail}`,
+      );
+      await Bun.sleep(backoffMs);
+    } finally {
+      if (workerRedis) {
+        workerClients.delete(workerRedis);
+        workerRedis.disconnect(false);
+      }
     }
   }
 }
@@ -2679,10 +2712,7 @@ async function commandDaemon(redisConfig: RedisConfig): Promise<void> {
   const outboundRedis = await createRedisClient(redisConfig);
   const inboundRedis = await createRedisClient(redisConfig);
   const apiRedis = await createRedisClient(redisConfig);
-  const autoCodexRedis =
-    autoCodexQueueToProject.size > 0
-      ? await createRedisClient(redisConfig)
-      : null;
+  const autoCodexWorkerClients = new Set<Redis>();
 
   const port = resolvePort();
   const server = await startHttpFacade(apiRedis, authTokens, port);
@@ -2714,11 +2744,18 @@ async function commandDaemon(redisConfig: RedisConfig): Promise<void> {
     },
   );
 
-  if (autoCodexRedis) {
-    runAutoCodexLoop(autoCodexRedis, autoCodexQueueToProject).catch(
+  for (const [userQueue, autoProject] of autoCodexQueueToProject.entries()) {
+    runAutoCodexProjectSupervisor(
+      redisConfig,
+      userQueue,
+      autoProject,
+      autoCodexWorkerClients,
+    ).catch(
       (error: unknown) => {
         const detail = error instanceof Error ? error.message : String(error);
-        console.error(`fatal auto-codex loop error: ${detail}`);
+        console.error(
+          `fatal auto-codex worker supervisor error for ${autoProject.projectKey}: ${detail}`,
+        );
       },
     );
   }
@@ -2729,7 +2766,10 @@ async function commandDaemon(redisConfig: RedisConfig): Promise<void> {
     outboundRedis.disconnect(false);
     inboundRedis.disconnect(false);
     apiRedis.disconnect(false);
-    autoCodexRedis?.disconnect(false);
+    for (const workerRedis of autoCodexWorkerClients.values()) {
+      workerRedis.disconnect(false);
+    }
+    autoCodexWorkerClients.clear();
     process.exit(0);
   };
 
