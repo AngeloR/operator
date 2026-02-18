@@ -62,6 +62,7 @@ cp config.example.json config.json
 
 Notes:
 - `agentApiToken` or `agentApiTokens` is required to use `/v1/agent/*` routes.
+- `/v1/metrics` is public (same access model as `/v1/health`).
 - `adminUserIds` gates which Matrix senders are enqueued into `[project]:user`.
 - Sync checkpoint is stored at Redis key `matrix-agent:sync:next-batch:v1`.
 - `autoCodex` is optional per project. When enabled, relay-core consumes `[project]:user`, runs the configured command with a rolling context bundle on stdin, and sends replies to `[project]:agent`.
@@ -118,6 +119,46 @@ curl -sS -X POST http://localhost:8888/v1/agent/send \
   -H "authorization: Bearer $AGENT_API_TOKEN" \
   -d '{"project":"matrix-router","agent":"agent-a","markdown":"hello from agent","format":"markdown"}'
 ```
+
+Metrics:
+
+```bash
+curl -sS http://localhost:8888/v1/metrics
+```
+
+Response shape:
+
+```json
+{
+  "ok": true,
+  "generatedAt": "2026-02-18T00:00:00.000Z",
+  "queueDepth": {
+    "total": 0,
+    "byQueue": { "matrix-router:user": 0, "matrix-router:agent": 0 },
+    "byProject": { "matrix-router": { "user": 0, "agent": 0, "total": 0 } }
+  },
+  "workerRestarts": { "total": 0, "byProject": {} },
+  "failures": { "total": 0, "byCategory": {}, "byProject": {} },
+  "processingLatency": {
+    "overall": {
+      "count": 0,
+      "sumMs": 0,
+      "minMs": null,
+      "maxMs": null,
+      "avgMs": null,
+      "p50Ms": null,
+      "p95Ms": null,
+      "sampleCount": 0
+    },
+    "byOperation": {}
+  }
+}
+```
+
+## Observability
+
+- Daemon logs are structured JSON.
+- Every log event includes these base fields: `timestamp`, `level`, `event`, `projectKey`, `jobId`, `queue`, `sender`, `durationMs`.
 
 ## Redis Queue Model
 

@@ -169,6 +169,41 @@ type AutoCodexStreamHandlers = {
   onStreamText?: (text: string) => void;
 };
 
+type LogLevel = "info" | "warn" | "error";
+
+type LogContext = {
+  projectKey?: string | null;
+  jobId?: string | null;
+  queue?: string | null;
+  sender?: string | null;
+  durationMs?: number | null;
+  [key: string]: unknown;
+};
+
+type LatencyAccumulator = {
+  count: number;
+  sumMs: number;
+  minMs: number | null;
+  maxMs: number | null;
+  samplesMs: number[];
+};
+
+type MetricsState = {
+  workerRestarts: {
+    total: number;
+    byProject: Map<string, number>;
+  };
+  failures: {
+    total: number;
+    byCategory: Map<string, number>;
+    byProject: Map<string, number>;
+  };
+  processingLatency: {
+    overall: LatencyAccumulator;
+    byOperation: Map<string, LatencyAccumulator>;
+  };
+};
+
 const cfg = config as AppConfig;
 const projects = cfg.projects ?? {};
 const SYNC_TOKEN_KEY = "matrix-agent:sync:next-batch:v1";
@@ -196,6 +231,221 @@ const COMMAND_OUTPUT_CAPTURE_LIMIT_CHARS = 200_000;
 const THINKING_LEADING_STATUS_PATTERN = /^\s*(?:\*\*)?thinking(?:\.{3}|…)(?:\*\*)?(?:\s*\n+|\s+)/i;
 const THINKING_INLINE_TITLE_PATTERN = /(^|\n)(\*\*[^*\n]+\*\*)(?=[\p{L}\p{N}"'“‘(])/gu;
 const THINKING_TITLE_CONTINUATION_START_PATTERN = /^[\p{L}\p{N}"'“‘(]/u;
+const METRICS_LATENCY_SAMPLE_LIMIT = 2000;
+
+function createLatencyAccumulator(): LatencyAccumulator {
+  return {
+    count: 0,
+    sumMs: 0,
+    minMs: null,
+    maxMs: null,
+    samplesMs: [],
+  };
+}
+
+const metricsState: MetricsState = {
+  workerRestarts: {
+    total: 0,
+    byProject: new Map<string, number>(),
+  },
+  failures: {
+    total: 0,
+    byCategory: new Map<string, number>(),
+    byProject: new Map<string, number>(),
+  },
+  processingLatency: {
+    overall: createLatencyAccumulator(),
+    byOperation: new Map<string, LatencyAccumulator>(),
+  },
+};
+
+function incrementCounter(map: Map<string, number>, key: string): void {
+  map.set(key, (map.get(key) ?? 0) + 1);
+}
+
+function mapToRecord(map: Map<string, number>): Record<string, number> {
+  return Object.fromEntries([...map.entries()].sort((a, b) => a[0].localeCompare(b[0])));
+}
+
+function logEvent(level: LogLevel, event: string, context: LogContext = {}): void {
+  const payload: Record<string, unknown> = {
+    timestamp: new Date().toISOString(),
+    level,
+    event,
+    projectKey: context.projectKey ?? null,
+    jobId: context.jobId ?? null,
+    queue: context.queue ?? null,
+    sender: context.sender ?? null,
+    durationMs: context.durationMs ?? null,
+  };
+
+  for (const [key, value] of Object.entries(context)) {
+    if (key in payload) {
+      continue;
+    }
+    payload[key] = value;
+  }
+
+  const line = JSON.stringify(payload);
+  if (level === "error") {
+    console.error(line);
+    return;
+  }
+
+  if (level === "warn") {
+    console.warn(line);
+    return;
+  }
+
+  console.log(line);
+}
+
+function recordFailure(category: string, projectKey?: string): void {
+  metricsState.failures.total += 1;
+  incrementCounter(metricsState.failures.byCategory, category);
+  incrementCounter(metricsState.failures.byProject, projectKey ?? "global");
+}
+
+function recordWorkerRestart(projectKey: string): void {
+  metricsState.workerRestarts.total += 1;
+  incrementCounter(metricsState.workerRestarts.byProject, projectKey);
+}
+
+function recordLatencySample(accumulator: LatencyAccumulator, durationMs: number): void {
+  const normalized = Math.max(0, Math.round(durationMs));
+  accumulator.count += 1;
+  accumulator.sumMs += normalized;
+  accumulator.minMs = accumulator.minMs === null
+    ? normalized
+    : Math.min(accumulator.minMs, normalized);
+  accumulator.maxMs = accumulator.maxMs === null
+    ? normalized
+    : Math.max(accumulator.maxMs, normalized);
+
+  accumulator.samplesMs.push(normalized);
+  if (accumulator.samplesMs.length > METRICS_LATENCY_SAMPLE_LIMIT) {
+    accumulator.samplesMs.shift();
+  }
+}
+
+function recordProcessingLatency(operation: string, durationMs: number): void {
+  recordLatencySample(metricsState.processingLatency.overall, durationMs);
+
+  let perOperation = metricsState.processingLatency.byOperation.get(operation);
+  if (!perOperation) {
+    perOperation = createLatencyAccumulator();
+    metricsState.processingLatency.byOperation.set(operation, perOperation);
+  }
+
+  recordLatencySample(perOperation, durationMs);
+}
+
+function percentile(sorted: number[], p: number): number | null {
+  if (sorted.length === 0) {
+    return null;
+  }
+
+  const index = Math.ceil((p / 100) * sorted.length) - 1;
+  const bounded = Math.max(0, Math.min(sorted.length - 1, index));
+  return sorted[bounded] ?? null;
+}
+
+function snapshotLatency(accumulator: LatencyAccumulator): Record<string, number | null> {
+  if (accumulator.count === 0) {
+    return {
+      count: 0,
+      sumMs: 0,
+      minMs: null,
+      maxMs: null,
+      avgMs: null,
+      p50Ms: null,
+      p95Ms: null,
+      sampleCount: 0,
+    };
+  }
+
+  const sorted = [...accumulator.samplesMs].sort((a, b) => a - b);
+  return {
+    count: accumulator.count,
+    sumMs: accumulator.sumMs,
+    minMs: accumulator.minMs,
+    maxMs: accumulator.maxMs,
+    avgMs: Number((accumulator.sumMs / accumulator.count).toFixed(2)),
+    p50Ms: percentile(sorted, 50),
+    p95Ms: percentile(sorted, 95),
+    sampleCount: accumulator.samplesMs.length,
+  };
+}
+
+async function collectQueueDepth(redis: Redis): Promise<{
+  total: number;
+  byQueue: Record<string, number>;
+  byProject: Record<string, { user: number; agent: number; total: number }>;
+}> {
+  const byQueue: Record<string, number> = {};
+  const byProject: Record<string, { user: number; agent: number; total: number }> = {};
+  let total = 0;
+
+  const projectKeys = Object.keys(projects);
+  await Promise.all(
+    projectKeys.map(async (projectKey) => {
+      const userQueue = queueKey(projectKey, "user");
+      const agentQueue = queueKey(projectKey, "agent");
+      const [userDepth, agentDepth] = await Promise.all([
+        redis.llen(userQueue),
+        redis.llen(agentQueue),
+      ]);
+
+      byQueue[userQueue] = userDepth;
+      byQueue[agentQueue] = agentDepth;
+      byProject[projectKey] = {
+        user: userDepth,
+        agent: agentDepth,
+        total: userDepth + agentDepth,
+      };
+    }),
+  );
+
+  for (const item of Object.values(byProject)) {
+    total += item.total;
+  }
+
+  return { total, byQueue, byProject };
+}
+
+function buildMetricsSnapshot(): {
+  workerRestarts: { total: number; byProject: Record<string, number> };
+  failures: {
+    total: number;
+    byCategory: Record<string, number>;
+    byProject: Record<string, number>;
+  };
+  processingLatency: {
+    overall: Record<string, number | null>;
+    byOperation: Record<string, Record<string, number | null>>;
+  };
+} {
+  const byOperation: Record<string, Record<string, number | null>> = {};
+  for (const [operation, stats] of metricsState.processingLatency.byOperation.entries()) {
+    byOperation[operation] = snapshotLatency(stats);
+  }
+
+  return {
+    workerRestarts: {
+      total: metricsState.workerRestarts.total,
+      byProject: mapToRecord(metricsState.workerRestarts.byProject),
+    },
+    failures: {
+      total: metricsState.failures.total,
+      byCategory: mapToRecord(metricsState.failures.byCategory),
+      byProject: mapToRecord(metricsState.failures.byProject),
+    },
+    processingLatency: {
+      overall: snapshotLatency(metricsState.processingLatency.overall),
+      byOperation,
+    },
+  };
+}
 
 if (!cfg.homeserverUrl || !cfg.accessToken) {
   throw new Error("config.json must include homeserverUrl and accessToken");
@@ -992,9 +1242,12 @@ function buildRoomToProjectMap(): Map<string, string> {
 
     const previous = roomToProject.get(roomId);
     if (previous && previous !== projectKey) {
-      console.warn(
-        `room ${roomId} is configured for multiple projects (${previous}, ${projectKey}); using ${previous}`,
-      );
+      logEvent("warn", "config.room.duplicate", {
+        projectKey,
+        roomId,
+        previousProjectKey: previous,
+        selectedProjectKey: previous,
+      });
       continue;
     }
 
@@ -1258,7 +1511,10 @@ async function fetchBotUserId(): Promise<string | undefined> {
     return nonEmptyText(whoami.user_id) ?? undefined;
   } catch (error: unknown) {
     const detail = error instanceof Error ? error.message : String(error);
-    console.warn(`whoami failed; bot sender filtering disabled: ${detail}`);
+    logEvent("warn", "matrix.whoami.failed", {
+      error: detail,
+      message: "bot sender filtering disabled",
+    });
     return undefined;
   }
 }
@@ -1437,7 +1693,9 @@ async function runCommandWithInput(
         handlers?.onStdoutChunk?.(text);
       } catch (error: unknown) {
         const detail = error instanceof Error ? error.message : String(error);
-        console.warn(`stdout handler failed: ${detail}`);
+        logEvent("warn", "command.stdout_handler.failed", {
+          error: detail,
+        });
       }
     });
 
@@ -1448,7 +1706,9 @@ async function runCommandWithInput(
         handlers?.onStderrChunk?.(text);
       } catch (error: unknown) {
         const detail = error instanceof Error ? error.message : String(error);
-        console.warn(`stderr handler failed: ${detail}`);
+        logEvent("warn", "command.stderr_handler.failed", {
+          error: detail,
+        });
       }
     });
 
@@ -2031,6 +2291,26 @@ async function handleAgentSend(
   }
 }
 
+async function handleMetrics(apiRedis: Redis): Promise<Response> {
+  try {
+    const queueDepth = await collectQueueDepth(apiRedis);
+    return json(200, {
+      ok: true,
+      service: "matrix-relay-core",
+      generatedAt: new Date().toISOString(),
+      queueDepth,
+      ...buildMetricsSnapshot(),
+    });
+  } catch (error: unknown) {
+    const detail = error instanceof Error ? error.message : String(error);
+    recordFailure("metrics_endpoint");
+    logEvent("error", "http.metrics.failed", {
+      error: detail,
+    });
+    return json(502, { error: detail });
+  }
+}
+
 function printUsage() {
   console.log(`matrix-relay-core
 
@@ -2050,6 +2330,7 @@ Commands:
 HTTP API (daemon):
   GET  /health
   GET  /v1/health
+  GET  /v1/metrics
   POST /v1/agent/poll
   POST /v1/agent/send
 
@@ -2108,18 +2389,16 @@ async function commandPush(
   const key = queueKey(projectKey, direction);
   const queueLength = await redis.rpush(key, JSON.stringify(envelope));
 
-  console.log(
-    JSON.stringify({
-      ok: true,
-      direction,
-      projectKey,
-      roomId: project.roomId,
-      queueKey: key,
-      queueLength,
-      eventId: envelope.id,
-      receivedAt: envelope.receivedAt,
-    }),
-  );
+  logEvent("info", "cli.push.completed", {
+    projectKey,
+    queue: key,
+    sender: envelope.sender ?? null,
+    direction,
+    roomId: project.roomId,
+    queueLength,
+    eventId: envelope.id,
+    receivedAt: envelope.receivedAt,
+  });
 }
 
 async function commandPollUser(redis: Redis, cli: ParsedCli): Promise<void> {
@@ -2138,22 +2417,22 @@ async function commandPollUser(redis: Redis, cli: ParsedCli): Promise<void> {
       : await redis.lpop(key);
 
   if (rawPayload === null) {
-    console.log(
-      JSON.stringify({ ok: true, projectKey, queueKey: key, message: null }),
-    );
+    logEvent("info", "cli.poll.empty", {
+      projectKey,
+      queue: key,
+    });
     return;
   }
 
   const message = parseEnvelope(rawPayload, projectKey, project.roomId);
 
-  console.log(
-    JSON.stringify({
-      ok: true,
-      projectKey,
-      queueKey: key,
-      message,
-    }),
-  );
+  logEvent("info", "cli.poll.message", {
+    projectKey,
+    queue: key,
+    sender: message.sender ?? null,
+    eventId: message.id,
+    message,
+  });
 }
 
 async function runOutboundLoop(
@@ -2174,12 +2453,17 @@ async function runOutboundLoop(
 
       const projectKey = queueToProject.get(poppedQueue);
       if (!projectKey) {
-        console.error(`unknown queue key from Redis: ${poppedQueue}`);
+        recordFailure("outbound_unknown_queue");
+        logEvent("error", "outbound.queue.unknown", {
+          queue: poppedQueue,
+          error: "unknown queue key from Redis",
+        });
         continue;
       }
 
       const project = resolveProject(projectKey);
       const envelope = parseEnvelope(rawPayload, projectKey, project.roomId);
+      const startedAt = Date.now();
 
       try {
         const eventId = await sendToRoom(
@@ -2190,27 +2474,35 @@ async function runOutboundLoop(
             agent: envelope.agent,
           }),
         );
-
-        console.log(
-          JSON.stringify({
-            ok: true,
-            direction: "agent",
-            projectKey,
-            roomId: envelope.roomId,
-            queueKey: poppedQueue,
-            queuedEventId: envelope.id,
-            matrixEventId: eventId,
-          }),
-        );
+        const durationMs = Date.now() - startedAt;
+        recordProcessingLatency("outbound_send", durationMs);
+        logEvent("info", "outbound.send.success", {
+          projectKey,
+          queue: poppedQueue,
+          sender: envelope.sender ?? null,
+          durationMs,
+          roomId: envelope.roomId,
+          queuedEventId: envelope.id,
+          matrixEventId: eventId,
+        });
       } catch (error: unknown) {
         const detail =
           error instanceof Error
             ? error.message
             : "failed to send Matrix message";
-
-        console.error(
-          `send failed for ${projectKey}; requeueing message: ${detail}`,
-        );
+        recordFailure("outbound_send", projectKey);
+        const durationMs = Date.now() - startedAt;
+        recordProcessingLatency("outbound_send", durationMs);
+        logEvent("error", "outbound.send.failed", {
+          projectKey,
+          queue: poppedQueue,
+          sender: envelope.sender ?? null,
+          durationMs,
+          roomId: envelope.roomId,
+          queuedEventId: envelope.id,
+          error: detail,
+          requeued: true,
+        });
 
         await outboundRedis.lpush(poppedQueue, rawPayload);
         await Bun.sleep(1000);
@@ -2218,7 +2510,10 @@ async function runOutboundLoop(
     } catch (error: unknown) {
       const detail =
         error instanceof Error ? error.message : "worker loop failed";
-      console.error(`outbound loop error: ${detail}`);
+      recordFailure("outbound_loop");
+      logEvent("error", "outbound.loop.error", {
+        error: detail,
+      });
       await Bun.sleep(1000);
     }
   }
@@ -2242,9 +2537,12 @@ async function runAutoCodexProjectWorker(
       const rawPayload = popped[1];
 
       if (poppedQueue !== userQueue) {
-        console.error(
-          `unexpected auto-codex queue key from Redis: expected ${userQueue}, got ${poppedQueue}`,
-        );
+        recordFailure("auto_codex_unexpected_queue", autoProject.projectKey);
+        logEvent("error", "auto_codex.queue.unexpected", {
+          projectKey: autoProject.projectKey,
+          queue: poppedQueue,
+          expectedQueue: userQueue,
+        });
         continue;
       }
 
@@ -2257,34 +2555,24 @@ async function runAutoCodexProjectWorker(
       const sender = envelope.sender ?? "unknown";
 
       if (!envelope.sender || !autoProject.senderAllowlist.has(envelope.sender)) {
-        console.log(
-          JSON.stringify({
-            ok: true,
-            source: "auto-codex",
-            skipped: true,
-            reason: "sender_not_allowlisted",
-            projectKey: autoProject.projectKey,
-            userQueue: poppedQueue,
-            sender,
-            queuedUserEventId: envelope.id,
-          }),
-        );
+        logEvent("info", "auto_codex.message.skipped", {
+          projectKey: autoProject.projectKey,
+          queue: poppedQueue,
+          sender,
+          reason: "sender_not_allowlisted",
+          queuedUserEventId: envelope.id,
+        });
         continue;
       }
 
       if (markAndCheckDuplicate(projectDedup, envelope.id)) {
-        console.log(
-          JSON.stringify({
-            ok: true,
-            source: "auto-codex",
-            skipped: true,
-            reason: "duplicate_event",
-            projectKey: autoProject.projectKey,
-            userQueue: poppedQueue,
-            sender,
-            queuedUserEventId: envelope.id,
-          }),
-        );
+        logEvent("info", "auto_codex.message.skipped", {
+          projectKey: autoProject.projectKey,
+          queue: poppedQueue,
+          sender,
+          reason: "duplicate_event",
+          queuedUserEventId: envelope.id,
+        });
         continue;
       }
 
@@ -2366,9 +2654,14 @@ async function runAutoCodexProjectWorker(
             .then(() => undefined)
             .catch((error: unknown) => {
               const detail = error instanceof Error ? error.message : String(error);
-              console.warn(
-                `auto-codex ${source} failed for ${autoProject.projectKey} (${jobId}): ${detail}`,
-              );
+              logEvent("warn", "auto_codex.status.enqueue_failed", {
+                projectKey: autoProject.projectKey,
+                queue: userQueue,
+                sender,
+                jobId,
+                source,
+                error: detail,
+              });
             });
 
           statusPromises.add(pending);
@@ -2398,9 +2691,13 @@ async function runAutoCodexProjectWorker(
               .then(() => undefined)
               .catch((error: unknown) => {
                 const detail = error instanceof Error ? error.message : String(error);
-                console.warn(
-                  `auto-codex stream failed for ${autoProject.projectKey} (${jobId}): ${detail}`,
-                );
+                logEvent("warn", "auto_codex.stream.enqueue_failed", {
+                  projectKey: autoProject.projectKey,
+                  queue: userQueue,
+                  sender,
+                  jobId,
+                  error: detail,
+                });
               });
 
             statusPromises.add(pending);
@@ -2539,25 +2836,25 @@ async function runAutoCodexProjectWorker(
           finalText,
         );
 
-        console.log(
-          JSON.stringify({
-            ok: true,
-            direction: "agent",
-            source: "auto-codex",
-            projectKey: autoProject.projectKey,
-            userQueue: poppedQueue,
-            agentQueue,
-            jobId,
-            sender,
-            queuedUserEventId: envelope.id,
-            ackEventId: ack?.id ?? null,
-            queuedAgentEventId: outbound.id,
-            durationMs: Date.now() - startedAt,
-          }),
-        );
+        const durationMs = Date.now() - startedAt;
+        recordProcessingLatency("auto_codex_job", durationMs);
+        logEvent("info", "auto_codex.job.completed", {
+          projectKey: autoProject.projectKey,
+          queue: poppedQueue,
+          sender,
+          jobId,
+          durationMs,
+          agentQueue,
+          queuedUserEventId: envelope.id,
+          ackEventId: ack?.id ?? null,
+          queuedAgentEventId: outbound.id,
+        });
       } catch (error: unknown) {
         const detail =
           error instanceof Error ? error.message : "auto-codex command failed";
+        const durationMs = Date.now() - startedAt;
+        recordFailure("auto_codex_job", autoProject.projectKey);
+        recordProcessingLatency("auto_codex_job", durationMs);
 
         const failureBody = `Codex job ${jobId} failed: ${detail}`;
         const outbound = await enqueueAutoCodexMessage(
@@ -2566,31 +2863,27 @@ async function runAutoCodexProjectWorker(
           failureBody,
           "plain",
         );
-
-        console.error(
-          `auto-codex failed for ${autoProject.projectKey} (${envelope.id}, job ${jobId}): ${detail}`,
-        );
-        console.log(
-          JSON.stringify({
-            ok: false,
-            direction: "agent",
-            source: "auto-codex",
-            projectKey: autoProject.projectKey,
-            userQueue: poppedQueue,
-            agentQueue,
-            jobId,
-            sender,
-            queuedUserEventId: envelope.id,
-            queuedAgentEventId: outbound.id,
-            durationMs: Date.now() - startedAt,
-            error: detail,
-          }),
-        );
+        logEvent("error", "auto_codex.job.failed", {
+          projectKey: autoProject.projectKey,
+          queue: poppedQueue,
+          sender,
+          jobId,
+          durationMs,
+          agentQueue,
+          queuedUserEventId: envelope.id,
+          queuedAgentEventId: outbound.id,
+          error: detail,
+        });
       }
     } catch (error: unknown) {
       const detail =
         error instanceof Error ? error.message : "auto-codex worker loop failed";
-      console.error(`auto-codex worker loop error for ${autoProject.projectKey}: ${detail}`);
+      recordFailure("auto_codex_worker_loop", autoProject.projectKey);
+      logEvent("error", "auto_codex.worker.loop_error", {
+        projectKey: autoProject.projectKey,
+        queue: userQueue,
+        error: detail,
+      });
       await Bun.sleep(1000);
     }
   }
@@ -2615,14 +2908,20 @@ async function runAutoCodexProjectSupervisor(
       crashCount += 1;
       const detail =
         error instanceof Error ? error.message : "auto-codex worker crashed";
+      recordWorkerRestart(autoProject.projectKey);
+      recordFailure("auto_codex_worker_crash", autoProject.projectKey);
       const backoffMs = Math.min(
         AUTO_CODEX_WORKER_RESTART_MAX_DELAY_MS,
         AUTO_CODEX_WORKER_RESTART_BASE_DELAY_MS *
           2 ** Math.min(crashCount - 1, 5),
       );
-      console.error(
-        `auto-codex worker crashed for ${autoProject.projectKey}; restarting in ${backoffMs}ms: ${detail}`,
-      );
+      logEvent("error", "auto_codex.worker.crashed", {
+        projectKey: autoProject.projectKey,
+        queue: userQueue,
+        error: detail,
+        restartInMs: backoffMs,
+        crashCount,
+      });
       await Bun.sleep(backoffMs);
     } finally {
       if (workerRedis) {
@@ -2643,23 +2942,33 @@ async function runInboundLoop(
 
   if (!since) {
     try {
+      const syncStartedAt = Date.now();
       const bootstrap = await syncMatrix(undefined, 0);
       const next = nonEmptyText(bootstrap.next_batch);
       if (next) {
         since = next;
         await inboundRedis.set(SYNC_TOKEN_KEY, next);
       }
-      console.log("initialized Matrix sync token (history skipped)");
+      const durationMs = Date.now() - syncStartedAt;
+      recordProcessingLatency("inbound_sync", durationMs);
+      logEvent("info", "inbound.sync.bootstrap.initialized", {
+        durationMs,
+      });
     } catch (error: unknown) {
       const detail = error instanceof Error ? error.message : String(error);
-      console.error(`failed to initialize Matrix sync token: ${detail}`);
+      recordFailure("inbound_sync_bootstrap");
+      logEvent("error", "inbound.sync.bootstrap.failed", {
+        error: detail,
+      });
       await Bun.sleep(1000);
     }
   }
 
   while (true) {
     try {
+      const syncStartedAt = Date.now();
       const syncResponse = await syncMatrix(since, 30000);
+      recordProcessingLatency("inbound_sync", Date.now() - syncStartedAt);
       const next = nonEmptyText(syncResponse.next_batch);
       if (next) {
         since = next;
@@ -2675,19 +2984,18 @@ async function runInboundLoop(
 
         try {
           const joinedRoomId = await joinMatrixRoom(roomId);
-          console.log(
-            JSON.stringify({
-              ok: true,
-              direction: "control",
-              source: "matrix",
-              action: "auto_join",
-              projectKey,
-              roomId: joinedRoomId ?? roomId,
-            }),
-          );
+          logEvent("info", "inbound.room.auto_joined", {
+            projectKey,
+            roomId: joinedRoomId ?? roomId,
+          });
         } catch (error: unknown) {
           const detail = error instanceof Error ? error.message : String(error);
-          console.error(`failed to auto-join room ${roomId} for ${projectKey}: ${detail}`);
+          recordFailure("inbound_auto_join", projectKey);
+          logEvent("error", "inbound.room.auto_join_failed", {
+            projectKey,
+            error: detail,
+            roomId,
+          });
         }
       }
 
@@ -2718,27 +3026,28 @@ async function runInboundLoop(
           }
 
           const key = queueKey(projectKey, "user");
+          const enqueueStartedAt = Date.now();
           const queueLength = await inboundRedis.rpush(key, JSON.stringify(envelope));
-
-          console.log(
-            JSON.stringify({
-              ok: true,
-              direction: "user",
-              source: "matrix",
-              projectKey,
-              roomId,
-              queueKey: key,
-              sender: envelope.sender,
-              eventId: envelope.id,
-              queueLength,
-            }),
-          );
+          const durationMs = Date.now() - enqueueStartedAt;
+          recordProcessingLatency("inbound_enqueue", durationMs);
+          logEvent("info", "inbound.message.enqueued", {
+            projectKey,
+            queue: key,
+            sender: envelope.sender ?? null,
+            durationMs,
+            roomId,
+            eventId: envelope.id,
+            queueLength,
+          });
         }
       }
     } catch (error: unknown) {
       const detail =
         error instanceof Error ? error.message : "matrix sync failed";
-      console.error(`inbound loop error: ${detail}`);
+      recordFailure("inbound_sync");
+      logEvent("error", "inbound.loop.error", {
+        error: detail,
+      });
       await Bun.sleep(1000);
     }
   }
@@ -2762,6 +3071,10 @@ async function startHttpFacade(
           service: "matrix-relay-core",
           authConfigured: authTokens.size > 0,
         });
+      }
+
+      if (path === "/v1/metrics" && method === "GET") {
+        return handleMetrics(apiRedis);
       }
 
       if (path === "/v1/agent/poll" && method === "POST") {
@@ -2800,9 +3113,10 @@ async function commandDaemon(redisConfig: RedisConfig): Promise<void> {
 
   const adminUserIds = parseAdminUserIds(cfg.adminUserIds);
   if (adminUserIds.size === 0) {
-    console.warn(
-      "adminUserIds is empty; inbound Matrix ingestion will accept all senders except the bot user",
-    );
+    logEvent("warn", "config.admin_user_ids.empty", {
+      message:
+        "inbound Matrix ingestion will accept all senders except the bot user",
+    });
   }
 
   const botUserId = await fetchBotUserId();
@@ -2816,30 +3130,38 @@ async function commandDaemon(redisConfig: RedisConfig): Promise<void> {
   const port = resolvePort();
   const server = await startHttpFacade(apiRedis, authTokens, port);
 
-  console.log(
-    `matrix-relay-core online at http://localhost:${server.port} (redis ${redisConfig.host}:${redisConfig.port}/${redisConfig.db}; outbound queues: ${
-      [...queueToProject.keys()].join(", ")
-    }; inbound rooms: ${[...roomToProject.keys()].join(", ") || "none"}; autoCodex: ${
-      autoCodexQueueToProject.size > 0
-        ? [...autoCodexQueueToProject.values()]
-            .map(
-              (item) =>
-                `${item.projectKey} -> ${item.command.join(" ")} @ ${item.cwd} (allowlist ${item.senderAllowlist.size})`,
-            )
-            .join(", ")
-        : "disabled"
-    }; botUserId: ${botUserId ?? "unknown"}; authTokens: ${authTokens.size})`,
-  );
+  logEvent("info", "daemon.online", {
+    port: server.port,
+    redisHost: redisConfig.host,
+    redisPort: redisConfig.port,
+    redisDb: redisConfig.db,
+    outboundQueues: [...queueToProject.keys()],
+    inboundRooms: [...roomToProject.keys()],
+    autoCodexProjects: [...autoCodexQueueToProject.values()].map((item) => ({
+      projectKey: item.projectKey,
+      command: item.command,
+      cwd: item.cwd,
+      senderAllowlistSize: item.senderAllowlist.size,
+    })),
+    botUserId: botUserId ?? "unknown",
+    authTokenCount: authTokens.size,
+  });
 
   runOutboundLoop(outboundRedis, queueToProject).catch((error: unknown) => {
     const detail = error instanceof Error ? error.message : String(error);
-    console.error(`fatal outbound loop error: ${detail}`);
+    recordFailure("outbound_loop_fatal");
+    logEvent("error", "outbound.loop.fatal", {
+      error: detail,
+    });
   });
 
   runInboundLoop(inboundRedis, roomToProject, adminUserIds, botUserId).catch(
     (error: unknown) => {
       const detail = error instanceof Error ? error.message : String(error);
-      console.error(`fatal inbound loop error: ${detail}`);
+      recordFailure("inbound_loop_fatal");
+      logEvent("error", "inbound.loop.fatal", {
+        error: detail,
+      });
     },
   );
 
@@ -2852,15 +3174,18 @@ async function commandDaemon(redisConfig: RedisConfig): Promise<void> {
     ).catch(
       (error: unknown) => {
         const detail = error instanceof Error ? error.message : String(error);
-        console.error(
-          `fatal auto-codex worker supervisor error for ${autoProject.projectKey}: ${detail}`,
-        );
+        recordFailure("auto_codex_supervisor_fatal", autoProject.projectKey);
+        logEvent("error", "auto_codex.supervisor.fatal", {
+          projectKey: autoProject.projectKey,
+          queue: userQueue,
+          error: detail,
+        });
       },
     );
   }
 
   const shutdown = () => {
-    console.log("shutting down matrix-relay-core");
+    logEvent("info", "daemon.shutdown");
     server.stop(true);
     outboundRedis.disconnect(false);
     inboundRedis.disconnect(false);
@@ -2917,6 +3242,8 @@ async function main() {
 
 main().catch((error: unknown) => {
   const detail = error instanceof Error ? error.message : String(error);
-  console.error(detail);
+  logEvent("error", "process.fatal", {
+    error: detail,
+  });
   process.exit(1);
 });
