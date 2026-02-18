@@ -2,22 +2,16 @@
 
 `matrix-agent` is now the **relay core**.
 
-It bridges Matrix <-> Redis and exposes a small HTTP facade so lightweight agent runtimes only need a local `config.json`.
+It bridges Matrix <-> Redis and exposes a small HTTP facade, with optional built-in autoCodex workers per project.
 
 ## Architecture
 
-Two layers:
+Single relay-core process:
 
-1. Relay core (this repo/process)
-- Matrix ingress: room message -> Redis `[project]:user`
-- Matrix egress: Redis `[project]:agent` -> room message
-- HTTP facade for agent runtimes
-
-2. Agent runtime (skill package)
-- polls relay core over HTTP
-- sends replies over HTTP
-- keeps local context state files
-- minimal setup on host
+1. Matrix ingress: room message -> Redis `[project]:user`
+2. Matrix egress: Redis `[project]:agent` -> room message
+3. Optional autoCodex workers consume `[project]:user` and publish to `[project]:agent`
+4. HTTP facade (`/v1/agent/poll`, `/v1/agent/send`) for external agent processes
 
 ## Install
 
@@ -75,7 +69,8 @@ Notes:
 - `autoCodexHeartbeatSeconds` defaults to `45`; for timed runs this heartbeat is used for non-Codex commands, while `codex exec` progress is stream-driven from JSON events. Set `0` to disable timed heartbeats.
 - `autoCodexVerbosity` defaults to `"output"` and controls status visibility:
 - `"debug"`: emit full status stream (ack + planning/executing/stream/heartbeat/finalizing) plus final output.
-- `"thinking"`: emit only parsed streamed JSON content updates (no job IDs/status labels) plus final output.
+- `"thinking"`: emit title-only thinking updates (one line per detected thinking section) plus final output.
+- `"thinking-complete"`: emit full thinking stream text and suppress duplicate final output when a stream already produced content.
 - `"output"`: emit only `Received.` acknowledgement plus final output.
 - `autoCodexDebug` is still accepted as a legacy fallback (`true -> "debug"`, `false -> "output"`), but `autoCodexVerbosity` takes precedence.
 - `autoCodexCwd` sets the working directory used for `autoCodexCommand` and is validated at daemon startup. If omitted, relay-core uses its own current working directory.
@@ -184,23 +179,4 @@ Poll user message:
 
 ```bash
 bun run src/index.ts poll-user matrix-router --block 30
-```
-
-## Skill Runtime Package
-
-A minimal agent-runtime skill is provided at:
-
-- `skills/matrix-agent-runtime/SKILL.md`
-
-Main scripts:
-- `skills/matrix-agent-runtime/scripts/poll.sh`
-- `skills/matrix-agent-runtime/scripts/send.sh`
-- `skills/matrix-agent-runtime/scripts/run-turn.sh`
-- `skills/matrix-agent-runtime/scripts/run-codex-loop.sh`
-- `skills/matrix-agent-runtime/scripts/summarize_state.sh`
-
-For local runtime usage, start from:
-
-```bash
-cp agent-runtime.example.json agent-runtime.json
 ```

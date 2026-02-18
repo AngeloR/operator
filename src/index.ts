@@ -4,6 +4,32 @@ import { marked } from "marked";
 import { spawn } from "node:child_process";
 import { appendFile, mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
+import {
+  type MessageFormat,
+  nonEmptyText,
+  parseFormat,
+  parseOptionalString,
+  tailLines,
+  truncateInline,
+  truncateText,
+} from "./text";
+import {
+  appendCapturedOutput,
+  appendStreamText,
+  extractJsonLinesText,
+  extractStreamText,
+  extractThinkingTitles,
+  formatThinkingStreamDelta,
+  tryDecodeJsonMessageText,
+} from "./codex-stream";
+import {
+  buildMetricsSnapshot,
+  collectQueueDepth,
+  logEvent,
+  recordFailure,
+  recordProcessingLatency,
+  recordWorkerRestart,
+} from "./metrics";
 
 type ProjectConfig = {
   roomId: string;
@@ -39,7 +65,6 @@ type AppConfig = {
   redisDb?: number;
 };
 
-type MessageFormat = "markdown" | "plain";
 type QueueDirection = "agent" | "user";
 type AutoCodexVerbosity = "debug" | "thinking" | "thinking-complete" | "output";
 
@@ -169,41 +194,6 @@ type AutoCodexStreamHandlers = {
   onStreamText?: (text: string) => void;
 };
 
-type LogLevel = "info" | "warn" | "error";
-
-type LogContext = {
-  projectKey?: string | null;
-  jobId?: string | null;
-  queue?: string | null;
-  sender?: string | null;
-  durationMs?: number | null;
-  [key: string]: unknown;
-};
-
-type LatencyAccumulator = {
-  count: number;
-  sumMs: number;
-  minMs: number | null;
-  maxMs: number | null;
-  samplesMs: number[];
-};
-
-type MetricsState = {
-  workerRestarts: {
-    total: number;
-    byProject: Map<string, number>;
-  };
-  failures: {
-    total: number;
-    byCategory: Map<string, number>;
-    byProject: Map<string, number>;
-  };
-  processingLatency: {
-    overall: LatencyAccumulator;
-    byOperation: Map<string, LatencyAccumulator>;
-  };
-};
-
 const cfg = config as AppConfig;
 const projects = cfg.projects ?? {};
 const SYNC_TOKEN_KEY = "matrix-agent:sync:next-batch:v1";
@@ -227,225 +217,6 @@ const AUTO_CODEX_STREAM_UPDATE_MIN_CHARS = 200;
 const AUTO_CODEX_STREAM_PREVIEW_MAX_CHARS = 4000;
 const AUTO_CODEX_WORKER_RESTART_BASE_DELAY_MS = 1000;
 const AUTO_CODEX_WORKER_RESTART_MAX_DELAY_MS = 30_000;
-const COMMAND_OUTPUT_CAPTURE_LIMIT_CHARS = 200_000;
-const THINKING_LEADING_STATUS_PATTERN = /^\s*(?:\*\*)?thinking(?:\.{3}|…)(?:\*\*)?(?:\s*\n+|\s+)/i;
-const THINKING_INLINE_TITLE_PATTERN = /(^|\n)(\*\*[^*\n]+\*\*)(?=[\p{L}\p{N}"'“‘(])/gu;
-const THINKING_TITLE_CONTINUATION_START_PATTERN = /^[\p{L}\p{N}"'“‘(]/u;
-const METRICS_LATENCY_SAMPLE_LIMIT = 2000;
-
-function createLatencyAccumulator(): LatencyAccumulator {
-  return {
-    count: 0,
-    sumMs: 0,
-    minMs: null,
-    maxMs: null,
-    samplesMs: [],
-  };
-}
-
-const metricsState: MetricsState = {
-  workerRestarts: {
-    total: 0,
-    byProject: new Map<string, number>(),
-  },
-  failures: {
-    total: 0,
-    byCategory: new Map<string, number>(),
-    byProject: new Map<string, number>(),
-  },
-  processingLatency: {
-    overall: createLatencyAccumulator(),
-    byOperation: new Map<string, LatencyAccumulator>(),
-  },
-};
-
-function incrementCounter(map: Map<string, number>, key: string): void {
-  map.set(key, (map.get(key) ?? 0) + 1);
-}
-
-function mapToRecord(map: Map<string, number>): Record<string, number> {
-  return Object.fromEntries([...map.entries()].sort((a, b) => a[0].localeCompare(b[0])));
-}
-
-function logEvent(level: LogLevel, event: string, context: LogContext = {}): void {
-  const payload: Record<string, unknown> = {
-    timestamp: new Date().toISOString(),
-    level,
-    event,
-    projectKey: context.projectKey ?? null,
-    jobId: context.jobId ?? null,
-    queue: context.queue ?? null,
-    sender: context.sender ?? null,
-    durationMs: context.durationMs ?? null,
-  };
-
-  for (const [key, value] of Object.entries(context)) {
-    if (key in payload) {
-      continue;
-    }
-    payload[key] = value;
-  }
-
-  const line = JSON.stringify(payload);
-  if (level === "error") {
-    console.error(line);
-    return;
-  }
-
-  if (level === "warn") {
-    console.warn(line);
-    return;
-  }
-
-  console.log(line);
-}
-
-function recordFailure(category: string, projectKey?: string): void {
-  metricsState.failures.total += 1;
-  incrementCounter(metricsState.failures.byCategory, category);
-  incrementCounter(metricsState.failures.byProject, projectKey ?? "global");
-}
-
-function recordWorkerRestart(projectKey: string): void {
-  metricsState.workerRestarts.total += 1;
-  incrementCounter(metricsState.workerRestarts.byProject, projectKey);
-}
-
-function recordLatencySample(accumulator: LatencyAccumulator, durationMs: number): void {
-  const normalized = Math.max(0, Math.round(durationMs));
-  accumulator.count += 1;
-  accumulator.sumMs += normalized;
-  accumulator.minMs = accumulator.minMs === null
-    ? normalized
-    : Math.min(accumulator.minMs, normalized);
-  accumulator.maxMs = accumulator.maxMs === null
-    ? normalized
-    : Math.max(accumulator.maxMs, normalized);
-
-  accumulator.samplesMs.push(normalized);
-  if (accumulator.samplesMs.length > METRICS_LATENCY_SAMPLE_LIMIT) {
-    accumulator.samplesMs.shift();
-  }
-}
-
-function recordProcessingLatency(operation: string, durationMs: number): void {
-  recordLatencySample(metricsState.processingLatency.overall, durationMs);
-
-  let perOperation = metricsState.processingLatency.byOperation.get(operation);
-  if (!perOperation) {
-    perOperation = createLatencyAccumulator();
-    metricsState.processingLatency.byOperation.set(operation, perOperation);
-  }
-
-  recordLatencySample(perOperation, durationMs);
-}
-
-function percentile(sorted: number[], p: number): number | null {
-  if (sorted.length === 0) {
-    return null;
-  }
-
-  const index = Math.ceil((p / 100) * sorted.length) - 1;
-  const bounded = Math.max(0, Math.min(sorted.length - 1, index));
-  return sorted[bounded] ?? null;
-}
-
-function snapshotLatency(accumulator: LatencyAccumulator): Record<string, number | null> {
-  if (accumulator.count === 0) {
-    return {
-      count: 0,
-      sumMs: 0,
-      minMs: null,
-      maxMs: null,
-      avgMs: null,
-      p50Ms: null,
-      p95Ms: null,
-      sampleCount: 0,
-    };
-  }
-
-  const sorted = [...accumulator.samplesMs].sort((a, b) => a - b);
-  return {
-    count: accumulator.count,
-    sumMs: accumulator.sumMs,
-    minMs: accumulator.minMs,
-    maxMs: accumulator.maxMs,
-    avgMs: Number((accumulator.sumMs / accumulator.count).toFixed(2)),
-    p50Ms: percentile(sorted, 50),
-    p95Ms: percentile(sorted, 95),
-    sampleCount: accumulator.samplesMs.length,
-  };
-}
-
-async function collectQueueDepth(redis: Redis): Promise<{
-  total: number;
-  byQueue: Record<string, number>;
-  byProject: Record<string, { user: number; agent: number; total: number }>;
-}> {
-  const byQueue: Record<string, number> = {};
-  const byProject: Record<string, { user: number; agent: number; total: number }> = {};
-  let total = 0;
-
-  const projectKeys = Object.keys(projects);
-  await Promise.all(
-    projectKeys.map(async (projectKey) => {
-      const userQueue = queueKey(projectKey, "user");
-      const agentQueue = queueKey(projectKey, "agent");
-      const [userDepth, agentDepth] = await Promise.all([
-        redis.llen(userQueue),
-        redis.llen(agentQueue),
-      ]);
-
-      byQueue[userQueue] = userDepth;
-      byQueue[agentQueue] = agentDepth;
-      byProject[projectKey] = {
-        user: userDepth,
-        agent: agentDepth,
-        total: userDepth + agentDepth,
-      };
-    }),
-  );
-
-  for (const item of Object.values(byProject)) {
-    total += item.total;
-  }
-
-  return { total, byQueue, byProject };
-}
-
-function buildMetricsSnapshot(): {
-  workerRestarts: { total: number; byProject: Record<string, number> };
-  failures: {
-    total: number;
-    byCategory: Record<string, number>;
-    byProject: Record<string, number>;
-  };
-  processingLatency: {
-    overall: Record<string, number | null>;
-    byOperation: Record<string, Record<string, number | null>>;
-  };
-} {
-  const byOperation: Record<string, Record<string, number | null>> = {};
-  for (const [operation, stats] of metricsState.processingLatency.byOperation.entries()) {
-    byOperation[operation] = snapshotLatency(stats);
-  }
-
-  return {
-    workerRestarts: {
-      total: metricsState.workerRestarts.total,
-      byProject: mapToRecord(metricsState.workerRestarts.byProject),
-    },
-    failures: {
-      total: metricsState.failures.total,
-      byCategory: mapToRecord(metricsState.failures.byCategory),
-      byProject: mapToRecord(metricsState.failures.byProject),
-    },
-    processingLatency: {
-      overall: snapshotLatency(metricsState.processingLatency.overall),
-      byOperation,
-    },
-  };
-}
 
 if (!cfg.homeserverUrl || !cfg.accessToken) {
   throw new Error("config.json must include homeserverUrl and accessToken");
@@ -453,28 +224,6 @@ if (!cfg.homeserverUrl || !cfg.accessToken) {
 
 function json(status: number, payload: unknown): Response {
   return Response.json(payload, { status });
-}
-
-function nonEmptyText(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  if (!/\S/.test(value)) return null;
-  return value.replace(/\r\n/g, "\n");
-}
-
-function parseFormat(value: unknown): MessageFormat {
-  return value === "plain" ? "plain" : "markdown";
-}
-
-function parseAgent(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined;
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
-}
-
-function parseSender(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined;
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 function parseAdminUserIds(value: unknown): Set<string> {
@@ -712,53 +461,6 @@ function renderTemplate(
   );
 }
 
-function truncateText(input: string, maxChars: number): string {
-  if (input.length <= maxChars) {
-    return input;
-  }
-
-  const keep = Math.max(maxChars - 24, 0);
-  return `${input.slice(0, keep)}\n\n[truncated]`;
-}
-
-function tailLines(input: string, lineCount: number): string {
-  if (!input) {
-    return "";
-  }
-
-  const lines = input.replace(/\r\n/g, "\n").split("\n");
-  if (lines.length <= lineCount) {
-    return input;
-  }
-
-  return lines.slice(lines.length - lineCount).join("\n");
-}
-
-function appendCapturedOutput(current: string, chunk: string): string {
-  if (!chunk) {
-    return current;
-  }
-
-  const next = current + chunk;
-  if (next.length <= COMMAND_OUTPUT_CAPTURE_LIMIT_CHARS) {
-    return next;
-  }
-
-  return next.slice(next.length - COMMAND_OUTPUT_CAPTURE_LIMIT_CHARS);
-}
-
-function truncateInline(input: string, maxChars: number): string {
-  if (input.length <= maxChars) {
-    return input;
-  }
-
-  if (maxChars <= 3) {
-    return input.slice(0, maxChars);
-  }
-
-  return `${input.slice(0, maxChars - 3)}...`;
-}
-
 function isCommandOptionToken(
   token: string,
   longName: string,
@@ -873,217 +575,6 @@ function prepareAutoCodexCommand(
   }
 
   return prepared;
-}
-
-function findSuffixPrefixOverlap(left: string, right: string): number {
-  const max = Math.min(left.length, right.length, 4096);
-  for (let len = max; len > 0; len -= 1) {
-    if (left.slice(left.length - len) === right.slice(0, len)) {
-      return len;
-    }
-  }
-  return 0;
-}
-
-function appendStreamText(current: string, chunk: string): string {
-  const normalized = chunk.replace(/\r\n/g, "\n");
-  if (!normalized) {
-    return current;
-  }
-
-  if (!current) {
-    return appendCapturedOutput("", normalized);
-  }
-
-  if (current.endsWith(normalized)) {
-    return current;
-  }
-
-  const overlap = findSuffixPrefixOverlap(current, normalized);
-  const next = current + normalized.slice(overlap);
-  if (next.length <= COMMAND_OUTPUT_CAPTURE_LIMIT_CHARS) {
-    return next;
-  }
-  return next.slice(next.length - COMMAND_OUTPUT_CAPTURE_LIMIT_CHARS);
-}
-
-function formatThinkingStreamDelta(
-  streamText: string,
-  lastStreamSentChars: number,
-): string {
-  let delta = streamText.slice(lastStreamSentChars).replace(/\r\n/g, "\n");
-  if (!delta) {
-    return delta;
-  }
-
-  if (lastStreamSentChars === 0) {
-    delta = delta.replace(THINKING_LEADING_STATUS_PATTERN, "");
-  }
-
-  if (
-    lastStreamSentChars > 0 &&
-    streamText.slice(Math.max(0, lastStreamSentChars - 2), lastStreamSentChars).endsWith("**") &&
-    THINKING_TITLE_CONTINUATION_START_PATTERN.test(delta)
-  ) {
-    delta = `\n\n${delta}`;
-  }
-
-  return delta.replace(THINKING_INLINE_TITLE_PATTERN, "$1$2\n\n");
-}
-
-function normalizeThinkingTitle(value: string): string | null {
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return null;
-  }
-
-  const withoutBold = trimmed.replace(/^\*\*([^*\n]+)\*\*$/u, "$1").trim();
-  if (!withoutBold) {
-    return null;
-  }
-
-  if (withoutBold.length > 180) {
-    return null;
-  }
-
-  return withoutBold;
-}
-
-function extractThinkingTitles(streamText: string): string[] {
-  const formatted = formatThinkingStreamDelta(streamText, 0);
-  if (!formatted) {
-    return [];
-  }
-
-  const titles: string[] = [];
-  const titlePattern = /(^|\n{2,})([^\n]+)\n{2,}/g;
-  for (const match of formatted.matchAll(titlePattern)) {
-    const candidate = match[2];
-    if (!candidate) {
-      continue;
-    }
-
-    const title = normalizeThinkingTitle(candidate);
-    if (title) {
-      titles.push(title);
-    }
-  }
-
-  return titles;
-}
-
-function tryDecodeJsonMessageText(value: string): string | null {
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return null;
-  }
-
-  const startsLikeJson = trimmed.startsWith("{") ||
-    trimmed.startsWith("[") ||
-    trimmed.startsWith('"');
-  if (!startsLikeJson) {
-    return null;
-  }
-
-  let payload: unknown;
-  try {
-    payload = JSON.parse(trimmed) as unknown;
-  } catch {
-    return null;
-  }
-
-  if (typeof payload === "string") {
-    return nonEmptyText(payload);
-  }
-
-  return extractStreamText(payload);
-}
-
-function extractJsonLinesText(output: string): string | null {
-  const normalized = output.replace(/\r\n/g, "\n");
-  if (!normalized) {
-    return null;
-  }
-
-  let combined = "";
-  for (const line of normalized.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) {
-      continue;
-    }
-
-    let payload: unknown;
-    try {
-      payload = JSON.parse(trimmed) as unknown;
-    } catch {
-      continue;
-    }
-
-    const text = extractStreamText(payload);
-    if (text) {
-      combined = appendStreamText(combined, text);
-    }
-  }
-
-  if (combined) {
-    return combined;
-  }
-
-  return tryDecodeJsonMessageText(normalized);
-}
-
-function extractStreamText(value: unknown, depth = 0): string | null {
-  if (depth > 6) {
-    return null;
-  }
-
-  if (typeof value === "string") {
-    const parsed = nonEmptyText(value);
-    return parsed;
-  }
-
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const found = extractStreamText(item, depth + 1);
-      if (found) {
-        return found;
-      }
-    }
-    return null;
-  }
-
-  if (typeof value !== "object" || value === null) {
-    return null;
-  }
-
-  const obj = value as Record<string, unknown>;
-  const primaryKeys = ["delta", "text", "output_text", "markdown", "body", "message"];
-  for (const key of primaryKeys) {
-    const found = extractStreamText(obj[key], depth + 1);
-    if (found) {
-      return found;
-    }
-  }
-
-  const containerKeys = [
-    "content",
-    "item",
-    "data",
-    "event",
-    "response",
-    "output",
-    "choices",
-    "result",
-    "messages",
-  ];
-  for (const key of containerKeys) {
-    const found = extractStreamText(obj[key], depth + 1);
-    if (found) {
-      return found;
-    }
-  }
-
-  return null;
 }
 
 function buildAutoCodexMap(): Map<string, AutoCodexProject> {
@@ -1472,82 +963,87 @@ function parseEnvelope(
     roomId: candidateRoom ?? fallbackRoomId,
     body,
     format: parseFormat(obj.format),
-    agent: parseAgent(obj.agent),
-    sender: parseSender(obj.sender),
+    agent: parseOptionalString(obj.agent),
+    sender: parseOptionalString(obj.sender),
     receivedAt: candidateReceivedAt ?? new Date().toISOString(),
   };
+}
+
+async function readJsonOrNull(response: Response): Promise<unknown> {
+  try {
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+function throwMatrixHttpError(
+  response: Response,
+  payload: unknown,
+  fallbackDetail: string,
+): never {
+  const err = payload as { errcode?: unknown; error?: unknown };
+  const errcode = typeof err?.errcode === "string" ? err.errcode : "M_UNKNOWN";
+  const detail = typeof err?.error === "string"
+    ? err.error
+    : fallbackDetail || `HTTP ${response.status} ${response.statusText}`;
+  throw new Error(`${errcode}: ${detail}`);
+}
+
+async function matrixRequest<T>(
+  method: "GET" | "POST" | "PUT",
+  path: string,
+  options: {
+    query?: Record<string, string | undefined>;
+    payload?: unknown;
+    fallbackErrorDetail?: string;
+  } = {},
+): Promise<T> {
+  const url = new URL(path, cfg.homeserverUrl);
+  for (const [key, value] of Object.entries(options.query ?? {})) {
+    if (value !== undefined) {
+      url.searchParams.set(key, value);
+    }
+  }
+
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${cfg.accessToken}`,
+  };
+
+  let body: string | undefined;
+  if (options.payload !== undefined) {
+    headers["content-type"] = "application/json";
+    body = JSON.stringify(options.payload);
+  }
+
+  const response = await fetch(url, {
+    method,
+    headers,
+    body,
+  });
+
+  const payload = await readJsonOrNull(response);
+
+  if (!response.ok) {
+    throwMatrixHttpError(
+      response,
+      payload,
+      options.fallbackErrorDetail ?? `HTTP ${response.status} ${response.statusText}`,
+    );
+  }
+
+  return payload as T;
 }
 
 async function matrixGet<T>(
   path: string,
   query: Record<string, string | undefined>,
 ): Promise<T> {
-  const url = new URL(path, cfg.homeserverUrl);
-  for (const [key, value] of Object.entries(query)) {
-    if (value !== undefined) {
-      url.searchParams.set(key, value);
-    }
-  }
-
-  const response = await fetch(url, {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${cfg.accessToken}`,
-    },
-  });
-
-  let payload: unknown = null;
-  try {
-    payload = await response.json();
-  } catch {
-    payload = null;
-  }
-
-  if (!response.ok) {
-    const err = payload as { errcode?: unknown; error?: unknown };
-    const errcode =
-      typeof err?.errcode === "string" ? err.errcode : "M_UNKNOWN";
-    const detail =
-      typeof err?.error === "string"
-        ? err.error
-        : `HTTP ${response.status} ${response.statusText}`;
-    throw new Error(`${errcode}: ${detail}`);
-  }
-
-  return payload as T;
+  return matrixRequest<T>("GET", path, { query });
 }
 
 async function matrixPost<T>(path: string, payload: unknown): Promise<T> {
-  const url = new URL(path, cfg.homeserverUrl);
-
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${cfg.accessToken}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
-
-  let data: unknown = null;
-  try {
-    data = await response.json();
-  } catch {
-    data = null;
-  }
-
-  if (!response.ok) {
-    const err = data as { errcode?: unknown; error?: unknown };
-    const errcode =
-      typeof err?.errcode === "string" ? err.errcode : "M_UNKNOWN";
-    const detail =
-      typeof err?.error === "string"
-        ? err.error
-        : `HTTP ${response.status} ${response.statusText}`;
-    throw new Error(`${errcode}: ${detail}`);
-  }
-
-  return data as T;
+  return matrixRequest<T>("POST", path, { payload });
 }
 
 async function fetchBotUserId(): Promise<string | undefined> {
@@ -1645,37 +1141,10 @@ async function sendToRoom(
 ): Promise<string> {
   const txnId = crypto.randomUUID();
   const path = `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${txnId}`;
-  const url = new URL(path, cfg.homeserverUrl);
-
-  const response = await fetch(url, {
-    method: "PUT",
-    headers: {
-      Authorization: `Bearer ${cfg.accessToken}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(content),
+  const payload = await matrixRequest<{ event_id?: unknown }>("PUT", path, {
+    payload: content,
+    fallbackErrorDetail: "Matrix request failed",
   });
-
-  let payload: { event_id?: unknown; errcode?: unknown; error?: unknown } = {};
-  try {
-    payload = (await response.json()) as {
-      event_id?: unknown;
-      errcode?: unknown;
-      error?: unknown;
-    };
-  } catch {
-    payload = {};
-  }
-
-  if (!response.ok) {
-    const errcode =
-      typeof payload.errcode === "string" ? payload.errcode : "M_UNKNOWN";
-    const error =
-      typeof payload.error === "string"
-        ? payload.error
-        : "Matrix request failed";
-    throw new Error(`${errcode}: ${error}`);
-  }
 
   if (typeof payload.event_id !== "string") {
     throw new Error("Matrix response missing event_id");
@@ -2182,28 +1651,26 @@ function authorizeAgentRequest(req: Request, tokens: Set<string>): Response | nu
   return null;
 }
 
-function parseAgentPollRequest(payload: JsonObject): AgentPollRequest {
+function parseProjectKeyFromPayload(payload: JsonObject): string {
   const projectKey = nonEmptyText(payload.project) ?? nonEmptyText(payload.project_key);
   if (!projectKey) {
     throw new Error("missing project (or project_key)");
   }
+  return projectKey;
+}
 
-  const agent = parseAgent(payload.agent);
+function parseAgentPollRequest(payload: JsonObject): AgentPollRequest {
+  const agent = parseOptionalString(payload.agent);
   const blockSeconds = parseBlockSeconds(payload.block_seconds, 30);
 
   return {
-    projectKey,
+    projectKey: parseProjectKeyFromPayload(payload),
     agent,
     blockSeconds,
   };
 }
 
 function parseAgentSendRequest(payload: JsonObject): AgentSendRequest {
-  const projectKey = nonEmptyText(payload.project) ?? nonEmptyText(payload.project_key);
-  if (!projectKey) {
-    throw new Error("missing project (or project_key)");
-  }
-
   const markdown = nonEmptyText(payload.markdown);
   const body =
     nonEmptyText(payload.body) ??
@@ -2220,10 +1687,10 @@ function parseAgentSendRequest(payload: JsonObject): AgentSendRequest {
     : parseFormat(payload.format);
 
   return {
-    projectKey,
+    projectKey: parseProjectKeyFromPayload(payload),
     body,
     format,
-    agent: parseAgent(payload.agent),
+    agent: parseOptionalString(payload.agent),
   };
 }
 
@@ -2341,7 +1808,11 @@ async function handleAgentSend(
 
 async function handleMetrics(apiRedis: Redis): Promise<Response> {
   try {
-    const queueDepth = await collectQueueDepth(apiRedis);
+    const queueDepth = await collectQueueDepth(
+      apiRedis,
+      Object.keys(projects),
+      queueKey,
+    );
     return json(200, {
       ok: true,
       service: "matrix-relay-core",
@@ -2426,8 +1897,8 @@ async function commandPush(
   }
 
   const format = parseFormat(getOption(cli, "format"));
-  const agent = parseAgent(getOption(cli, "agent"));
-  const sender = parseSender(getOption(cli, "sender"));
+  const agent = parseOptionalString(getOption(cli, "agent"));
+  const sender = parseOptionalString(getOption(cli, "sender"));
 
   const envelope = createEnvelope(projectKey, project.roomId, body, format, {
     agent,
