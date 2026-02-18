@@ -193,6 +193,9 @@ const AUTO_CODEX_STREAM_PREVIEW_MAX_CHARS = 4000;
 const AUTO_CODEX_WORKER_RESTART_BASE_DELAY_MS = 1000;
 const AUTO_CODEX_WORKER_RESTART_MAX_DELAY_MS = 30_000;
 const COMMAND_OUTPUT_CAPTURE_LIMIT_CHARS = 200_000;
+const THINKING_LEADING_STATUS_PATTERN = /^\s*(?:\*\*)?thinking(?:\.{3}|…)(?:\*\*)?(?:\s*\n+|\s+)/i;
+const THINKING_INLINE_TITLE_PATTERN = /(^|\n)(\*\*[^*\n]+\*\*)(?=[\p{L}\p{N}"'“‘(])/gu;
+const THINKING_TITLE_CONTINUATION_START_PATTERN = /^[\p{L}\p{N}"'“‘(]/u;
 
 if (!cfg.homeserverUrl || !cfg.accessToken) {
   throw new Error("config.json must include homeserverUrl and accessToken");
@@ -645,6 +648,30 @@ function appendStreamText(current: string, chunk: string): string {
     return next;
   }
   return next.slice(next.length - COMMAND_OUTPUT_CAPTURE_LIMIT_CHARS);
+}
+
+function formatThinkingStreamDelta(
+  streamText: string,
+  lastStreamSentChars: number,
+): string {
+  let delta = streamText.slice(lastStreamSentChars).replace(/\r\n/g, "\n");
+  if (!delta) {
+    return delta;
+  }
+
+  if (lastStreamSentChars === 0) {
+    delta = delta.replace(THINKING_LEADING_STATUS_PATTERN, "");
+  }
+
+  if (
+    lastStreamSentChars > 0 &&
+    streamText.slice(Math.max(0, lastStreamSentChars - 2), lastStreamSentChars).endsWith("**") &&
+    THINKING_TITLE_CONTINUATION_START_PATTERN.test(delta)
+  ) {
+    delta = `\n\n${delta}`;
+  }
+
+  return delta.replace(THINKING_INLINE_TITLE_PATTERN, "$1$2\n\n");
 }
 
 function tryDecodeJsonMessageText(value: string): string | null {
@@ -2418,8 +2445,11 @@ async function runAutoCodexProjectWorker(
           }
 
           if (autoProject.verbosity === "thinking") {
-            const delta = streamText.slice(lastStreamSentChars);
+            const delta = formatThinkingStreamDelta(streamText, lastStreamSentChars);
             if (!delta.trim()) {
+              lastStreamSentPhase = latestStreamPhase;
+              lastStreamSentAt = now;
+              lastStreamSentChars = streamText.length;
               return;
             }
             queueStreamPreview(delta);
