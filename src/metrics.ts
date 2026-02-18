@@ -1,4 +1,6 @@
-import type Redis from "ioredis";
+import type { RedisClient } from "bun";
+
+type Redis = RedisClient;
 
 type LatencyAccumulator = {
   count: number;

@@ -1,5 +1,5 @@
 import config from "../config.json";
-import Redis from "ioredis";
+import { RedisClient } from "bun";
 import { marked } from "marked";
 import { spawn } from "node:child_process";
 import { appendFile, mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
@@ -91,6 +91,8 @@ type QueueEnvelope = {
   sender?: string;
   receivedAt: string;
 };
+
+type Redis = RedisClient;
 
 type RedisConfig = {
   host: string;
@@ -865,23 +867,25 @@ function resolveRedisConfig(appConfig: AppConfig): RedisConfig {
 }
 
 async function createRedisClient(redisConfig: RedisConfig): Promise<Redis> {
-  const redis = new Redis({
-    host: redisConfig.host,
-    port: redisConfig.port,
-    db: redisConfig.db,
-    password: redisConfig.password,
-    connectTimeout: redisConfig.connectTimeoutMs,
-    maxRetriesPerRequest: 1,
-    lazyConnect: true,
-  });
+  const redisUrl = new URL("redis://localhost");
+  redisUrl.hostname = redisConfig.host;
+  redisUrl.port = String(redisConfig.port);
+  redisUrl.pathname = `/${redisConfig.db}`;
+  if (redisConfig.password) {
+    redisUrl.username = "default";
+    redisUrl.password = redisConfig.password;
+  }
 
-  redis.on("error", () => {});
+  const redis = new RedisClient(redisUrl.toString(), {
+    connectionTimeout: redisConfig.connectTimeoutMs,
+    maxRetries: 1,
+  });
 
   try {
     await redis.connect();
     return redis;
   } catch (error: unknown) {
-    redis.disconnect(false);
+    redis.close();
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(
       `failed to connect to Redis at ${redisConfig.host}:${redisConfig.port}/${redisConfig.db}: ${detail}`,
@@ -1962,7 +1966,7 @@ async function runOutboundLoop(
 
   while (true) {
     try {
-      const popped = await outboundRedis.blpop(queueNames, 5);
+      const popped = await outboundRedis.blpop(...queueNames, 5);
       if (popped === null || popped.length < 2) {
         continue;
       }
@@ -2470,7 +2474,7 @@ async function runAutoCodexProjectSupervisor(
     } finally {
       if (workerRedis) {
         workerClients.delete(workerRedis);
-        workerRedis.disconnect(false);
+        workerRedis.close();
       }
     }
   }
@@ -2731,11 +2735,11 @@ async function commandDaemon(redisConfig: RedisConfig): Promise<void> {
   const shutdown = () => {
     logEvent("info", "daemon.shutdown");
     server.stop(true);
-    outboundRedis.disconnect(false);
-    inboundRedis.disconnect(false);
-    apiRedis.disconnect(false);
+    outboundRedis.close();
+    inboundRedis.close();
+    apiRedis.close();
     for (const workerRedis of autoCodexWorkerClients.values()) {
-      workerRedis.disconnect(false);
+      workerRedis.close();
     }
     autoCodexWorkerClients.clear();
     process.exit(0);
@@ -2780,7 +2784,7 @@ async function main() {
         throw new Error(`unknown command: ${command}`);
     }
   } finally {
-    redis.disconnect(false);
+    redis.close();
   }
 }
 
