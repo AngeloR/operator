@@ -41,7 +41,7 @@ type AppConfig = {
 
 type MessageFormat = "markdown" | "plain";
 type QueueDirection = "agent" | "user";
-type AutoCodexVerbosity = "debug" | "thinking" | "output";
+type AutoCodexVerbosity = "debug" | "thinking" | "thinking-complete" | "output";
 
 type ParsedMessage = {
   body: string;
@@ -582,8 +582,15 @@ function parseAutoCodexVerbosity(
     throw new Error("autoCodexVerbosity must be a non-empty string");
   }
 
-  if (parsed !== "debug" && parsed !== "thinking" && parsed !== "output") {
-    throw new Error("autoCodexVerbosity must be one of: debug, thinking, output");
+  if (
+    parsed !== "debug" &&
+    parsed !== "thinking" &&
+    parsed !== "thinking-complete" &&
+    parsed !== "output"
+  ) {
+    throw new Error(
+      "autoCodexVerbosity must be one of: debug, thinking, thinking-complete, output",
+    );
   }
 
   return parsed;
@@ -922,6 +929,47 @@ function formatThinkingStreamDelta(
   }
 
   return delta.replace(THINKING_INLINE_TITLE_PATTERN, "$1$2\n\n");
+}
+
+function normalizeThinkingTitle(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const withoutBold = trimmed.replace(/^\*\*([^*\n]+)\*\*$/u, "$1").trim();
+  if (!withoutBold) {
+    return null;
+  }
+
+  if (withoutBold.length > 180) {
+    return null;
+  }
+
+  return withoutBold;
+}
+
+function extractThinkingTitles(streamText: string): string[] {
+  const formatted = formatThinkingStreamDelta(streamText, 0);
+  if (!formatted) {
+    return [];
+  }
+
+  const titles: string[] = [];
+  const titlePattern = /(^|\n{2,})([^\n]+)\n{2,}/g;
+  for (const match of formatted.matchAll(titlePattern)) {
+    const candidate = match[2];
+    if (!candidate) {
+      continue;
+    }
+
+    const title = normalizeThinkingTitle(candidate);
+    if (title) {
+      titles.push(title);
+    }
+  }
+
+  return titles;
 }
 
 function tryDecodeJsonMessageText(value: string): string | null {
@@ -2722,9 +2770,29 @@ async function runAutoCodexProjectWorker(
         let lastStreamSentPhase: string | null = null;
         let lastStreamSentAt = 0;
         let lastStreamSentChars = 0;
+        let thinkingTitlesSentCount = 0;
 
         const maybeSendStreamUpdate = (force: boolean): void => {
           if (!streamPreviewEnabled) {
+            return;
+          }
+
+          if (autoProject.verbosity === "thinking") {
+            const titles = extractThinkingTitles(streamText);
+            const unsentTitles = titles.slice(thinkingTitlesSentCount);
+            if (unsentTitles.length === 0) {
+              return;
+            }
+
+            for (const title of unsentTitles) {
+              queueStreamPreview(title);
+            }
+
+            const now = Date.now();
+            thinkingTitlesSentCount = titles.length;
+            lastStreamSentPhase = latestStreamPhase;
+            lastStreamSentAt = now;
+            lastStreamSentChars = streamText.length;
             return;
           }
 
@@ -2741,7 +2809,7 @@ async function runAutoCodexProjectWorker(
             return;
           }
 
-          if (autoProject.verbosity === "thinking") {
+          if (autoProject.verbosity === "thinking-complete") {
             const delta = formatThinkingStreamDelta(streamText, lastStreamSentChars);
             if (!delta.trim()) {
               lastStreamSentPhase = latestStreamPhase;
@@ -2810,6 +2878,17 @@ async function runAutoCodexProjectWorker(
         }
 
         const finalText = truncateText(reply, AUTO_CODEX_MAX_CONTEXT_CHARS);
+        const suppressFinalOutput = autoProject.verbosity === "thinking-complete" &&
+          streamPreviewEnabled &&
+          /\S/.test(streamText);
+        const outbound = suppressFinalOutput
+          ? null
+          : await enqueueAutoCodexMessage(
+            autoCodexRedis,
+            autoProject,
+            finalText,
+            "markdown",
+          );
 
         if (debugStatusEnabled) {
           await enqueueAutoCodexStatus(
@@ -2821,13 +2900,6 @@ async function runAutoCodexProjectWorker(
             sender,
           );
         }
-
-        const outbound = await enqueueAutoCodexMessage(
-          autoCodexRedis,
-          autoProject,
-          finalText,
-          "markdown",
-        );
 
         await appendTurnLog(
           paths.outboxLogPath,
@@ -2847,7 +2919,8 @@ async function runAutoCodexProjectWorker(
           agentQueue,
           queuedUserEventId: envelope.id,
           ackEventId: ack?.id ?? null,
-          queuedAgentEventId: outbound.id,
+          queuedAgentEventId: outbound?.id ?? null,
+          suppressedFinalOutput: suppressFinalOutput,
         });
       } catch (error: unknown) {
         const detail =
