@@ -13,6 +13,7 @@ type ProjectConfig = {
   autoCodexCommand?: string[];
   autoCodexTimeoutSeconds?: number;
   autoCodexHeartbeatSeconds?: number;
+  autoCodexVerbosity?: string;
   autoCodexDebug?: boolean;
   autoCodexProgressUpdates?: boolean;
   autoCodexStateDir?: string;
@@ -40,6 +41,7 @@ type AppConfig = {
 
 type MessageFormat = "markdown" | "plain";
 type QueueDirection = "agent" | "user";
+type AutoCodexVerbosity = "debug" | "thinking" | "output";
 
 type ParsedMessage = {
   body: string;
@@ -124,7 +126,7 @@ type AutoCodexProject = {
   command: string[];
   timeoutMs: number | null;
   heartbeatMs: number;
-  debug: boolean;
+  verbosity: AutoCodexVerbosity;
   progressUpdates: boolean;
   stateDir: string;
   cwd: string;
@@ -174,13 +176,12 @@ const DEFAULT_AUTO_CODEX_COMMAND = ["codex", "exec", "--skip-git-repo-check"];
 const DEFAULT_AUTO_CODEX_TIMEOUT_SECONDS = 300;
 const DEFAULT_AUTO_CODEX_HEARTBEAT_SECONDS = 45;
 const AUTO_CODEX_INFINITE_TIMEOUT_HEARTBEAT_MS = 15 * 60 * 1000;
-const DEFAULT_AUTO_CODEX_DEBUG = false;
+const DEFAULT_AUTO_CODEX_VERBOSITY: AutoCodexVerbosity = "output";
 const DEFAULT_AUTO_CODEX_PROGRESS_UPDATES = true;
 const DEFAULT_AUTO_CODEX_STATE_DIR = ".matrix-agent-state";
 const DEFAULT_AUTO_CODEX_ACK_TEMPLATE =
   "Received your message. Starting Codex job {{job_id}}.";
 const DEFAULT_AUTO_CODEX_PROGRESS_TEMPLATE = "Codex {{phase}} (job {{job_id}}).";
-const DEFAULT_AUTO_CODEX_THINKING_MESSAGE = "Thinking...";
 const DEFAULT_AUTO_CODEX_CONTEXT_TAIL_LINES = 60;
 const AUTO_CODEX_MAX_MESSAGE_CHARS = 16_000;
 const AUTO_CODEX_MAX_CONTEXT_CHARS = 24_000;
@@ -313,6 +314,26 @@ function parseAutoCodexBoolean(
   }
 
   return value;
+}
+
+function parseAutoCodexVerbosity(
+  value: unknown,
+  fallback: AutoCodexVerbosity,
+): AutoCodexVerbosity {
+  if (value === undefined) {
+    return fallback;
+  }
+
+  const parsed = nonEmptyText(value)?.toLowerCase();
+  if (!parsed) {
+    throw new Error("autoCodexVerbosity must be a non-empty string");
+  }
+
+  if (parsed !== "debug" && parsed !== "thinking" && parsed !== "output") {
+    throw new Error("autoCodexVerbosity must be one of: debug, thinking, output");
+  }
+
+  return parsed;
 }
 
 function parseAutoCodexString(
@@ -761,11 +782,20 @@ function buildAutoCodexMap(): Map<string, AutoCodexProject> {
     const heartbeatSeconds = parseAutoCodexHeartbeatSeconds(
       project.autoCodexHeartbeatSeconds,
     );
-    const debug = parseAutoCodexBoolean(
-      project.autoCodexDebug,
-      DEFAULT_AUTO_CODEX_DEBUG,
-      "autoCodexDebug",
-    );
+    const verbosity = project.autoCodexVerbosity !== undefined
+      ? parseAutoCodexVerbosity(
+        project.autoCodexVerbosity,
+        DEFAULT_AUTO_CODEX_VERBOSITY,
+      )
+      : project.autoCodexDebug !== undefined
+      ? parseAutoCodexBoolean(
+        project.autoCodexDebug,
+        false,
+        "autoCodexDebug",
+      )
+        ? "debug"
+        : DEFAULT_AUTO_CODEX_VERBOSITY
+      : DEFAULT_AUTO_CODEX_VERBOSITY;
     const progressUpdates = parseAutoCodexBoolean(
       project.autoCodexProgressUpdates,
       DEFAULT_AUTO_CODEX_PROGRESS_UPDATES,
@@ -805,7 +835,7 @@ function buildAutoCodexMap(): Map<string, AutoCodexProject> {
       command,
       timeoutMs: timeoutSeconds === 0 ? null : timeoutSeconds * 1000,
       heartbeatMs: heartbeatSeconds * 1000,
-      debug,
+      verbosity,
       progressUpdates,
       stateDir,
       cwd,
@@ -2006,13 +2036,13 @@ Project-level autoCodex (optional):
   autoCodexCommand: ["codex","exec","--skip-git-repo-check"]  # relay auto-adds --json + --output-last-message for codex exec
   autoCodexTimeoutSeconds: 300                         # timeout per message (0 disables timeout + forces 15m heartbeat)
   autoCodexHeartbeatSeconds: 45                        # periodic heartbeat for non-codex timed runs (0 disables)
-  autoCodexDebug: false                                # default false; when true, emits verbose status/progress messages
+  autoCodexVerbosity: "output"                         # output|thinking|debug (default output)
   autoCodexSenderAllowlist: ["@admin:your-server"]    # required
   autoCodexProgressUpdates: true                       # default true
   autoCodexStateDir: ".matrix-agent-state"            # default
   autoCodexCwd: "/abs/path/to/project"                # default: current relay-core cwd
-  autoCodexAckTemplate: "Starting Codex {{job_id}}."   # used when autoCodexDebug=true
-  autoCodexProgressTemplate: "Codex {{phase}} ({{job_id}})." # used when autoCodexDebug=true
+  autoCodexAckTemplate: "Starting Codex {{job_id}}."   # used when autoCodexVerbosity=debug
+  autoCodexProgressTemplate: "Codex {{phase}} ({{job_id}})." # used for debug + thinking stream updates
   autoCodexContextTailLines: 60                        # default
 
 Environment:
@@ -2233,24 +2263,32 @@ async function runAutoCodexProjectWorker(
 
       const jobId = crypto.randomUUID();
       const startedAt = Date.now();
-      const debugStatusEnabled = autoProject.debug && autoProject.progressUpdates;
+      const debugStatusEnabled =
+        autoProject.verbosity === "debug" && autoProject.progressUpdates;
+      const streamPreviewEnabled =
+        autoProject.verbosity !== "output" && autoProject.progressUpdates;
+      const streamPhaseEventsEnabled =
+        autoProject.verbosity === "debug" && autoProject.progressUpdates;
 
       try {
-        const ack = autoProject.debug
-          ? await enqueueAutoCodexStatus(
+        let ack: QueueEnvelope | null = null;
+        if (autoProject.verbosity === "debug") {
+          ack = await enqueueAutoCodexStatus(
             autoCodexRedis,
             autoProject,
             autoProject.ackTemplate,
             "started",
             jobId,
             sender,
-          )
-          : await enqueueAutoCodexMessage(
+          );
+        } else if (autoProject.verbosity === "output") {
+          ack = await enqueueAutoCodexMessage(
             autoCodexRedis,
             autoProject,
             "Received.",
             "plain",
           );
+        }
 
         if (debugStatusEnabled) {
           await enqueueAutoCodexStatus(
@@ -2278,13 +2316,6 @@ async function runAutoCodexProjectWorker(
             jobId,
             sender,
           );
-        } else if (autoProject.progressUpdates) {
-          await enqueueAutoCodexMessage(
-            autoCodexRedis,
-            autoProject,
-            DEFAULT_AUTO_CODEX_THINKING_MESSAGE,
-            "plain",
-          );
         }
 
         const statusPromises = new Set<Promise<void>>();
@@ -2297,10 +2328,6 @@ async function runAutoCodexProjectWorker(
           (noTimeoutMode || (!isCodexCommand && autoProject.progressUpdates));
 
         const queueStatus = (phase: string, source: "heartbeat" | "stream"): void => {
-          if (!debugStatusEnabled) {
-            return;
-          }
-
           const pending = enqueueAutoCodexStatus(
             autoCodexRedis,
             autoProject,
@@ -2340,7 +2367,7 @@ async function runAutoCodexProjectWorker(
         let lastStreamSentChars = 0;
 
         const maybeSendStreamUpdate = (force: boolean): void => {
-          if (!debugStatusEnabled) {
+          if (!streamPreviewEnabled) {
             return;
           }
 
@@ -2383,7 +2410,7 @@ async function runAutoCodexProjectWorker(
             {
               onStreamPhase: (phase: string) => {
                 latestStreamPhase = phase;
-                if (!debugStatusEnabled) {
+                if (!streamPhaseEventsEnabled) {
                   return;
                 }
 
@@ -2451,7 +2478,7 @@ async function runAutoCodexProjectWorker(
             jobId,
             sender,
             queuedUserEventId: envelope.id,
-            ackEventId: ack.id,
+            ackEventId: ack?.id ?? null,
             queuedAgentEventId: outbound.id,
             durationMs: Date.now() - startedAt,
           }),

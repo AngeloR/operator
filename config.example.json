@@ -17,7 +17,7 @@
       "autoCodexCommand": ["codex", "exec", "--skip-git-repo-check"],
       "autoCodexTimeoutSeconds": 300,
       "autoCodexHeartbeatSeconds": 45,
-      "autoCodexDebug": false,
+      "autoCodexVerbosity": "output",
       "autoCodexSenderAllowlist": ["@admin:your-server"],
       "autoCodexProgressUpdates": true,
       "autoCodexStateDir": ".matrix-agent-state",

@@ -47,7 +47,7 @@ cp config.example.json config.json
       "autoCodexCommand": ["codex", "exec", "--skip-git-repo-check"],
       "autoCodexTimeoutSeconds": 300,
       "autoCodexHeartbeatSeconds": 45,
-      "autoCodexDebug": false,
+      "autoCodexVerbosity": "output",
       "autoCodexSenderAllowlist": ["@admin:your-server"],
       "autoCodexProgressUpdates": true,
       "autoCodexStateDir": ".matrix-agent-state",
@@ -72,8 +72,11 @@ Notes:
 - For `codex exec`, relay automatically enables `--json` and writes `--output-last-message` to a temporary state file unless you already pass those flags in `autoCodexCommand`.
 - `autoCodexTimeoutSeconds` defaults to `300`; set `0` to disable timeout and force a 15-minute heartbeat while Codex is running.
 - `autoCodexHeartbeatSeconds` defaults to `45`; for timed runs this heartbeat is used for non-Codex commands, while `codex exec` progress is stream-driven from JSON events. Set `0` to disable timed heartbeats.
-- `autoCodexDebug` defaults to `false`. When enabled, relay sends verbose phase/stream status messages to Matrix using `autoCodexAckTemplate`/`autoCodexProgressTemplate`.
-- When `autoCodexDebug` is `false`, relay suppresses those verbose status messages and sends a lightweight `Received.` + `Thinking...` flow before the final answer.
+- `autoCodexVerbosity` defaults to `"output"` and controls status visibility:
+- `"debug"`: emit full status stream (ack + planning/executing/stream/heartbeat/finalizing) plus final output.
+- `"thinking"`: emit parsed streamed JSON content updates plus final output.
+- `"output"`: emit only `Received.` acknowledgement plus final output.
+- `autoCodexDebug` is still accepted as a legacy fallback (`true -> "debug"`, `false -> "output"`), but `autoCodexVerbosity` takes precedence.
 - `autoCodexCwd` sets the working directory used for `autoCodexCommand` and is validated at daemon startup. If omitted, relay-core uses its own current working directory.
 
 ## Run
