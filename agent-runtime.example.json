@@ -1,0 +1,9 @@
+{
+  "project": "matrix-router",
+  "agent": "agent-a",
+  "relay_base_url": "http://127.0.0.1:8888",
+  "agent_api_token": "replace-me-agent-token",
+  "poll_block_seconds": 30,
+  "context_tail_lines": 50,
+  "state_dir": ".matrix-agent-state"
+}

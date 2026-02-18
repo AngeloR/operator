@@ -1,0 +1,30 @@
+{
+  "port": 8888,
+  "homeserverUrl": "http://your-matrix-server:8008",
+  "accessToken": "replace-me-matrix-access-token",
+  "adminUserIds": ["@admin:your-server"],
+  "agentApiToken": "replace-me-agent-token",
+  "projects": {
+    "your-project": {
+      "roomId": "!yourRoomId:your-server",
+      "prefix": "YP"
+    },
+    "matrix-router": {
+      "roomId": "!yourOtherRoomId:your-server",
+      "prefix": "MR",
+      "autoCodex": true,
+      "autoCodexAgent": "codex",
+      "autoCodexCommand": ["codex", "exec", "--skip-git-repo-check"],
+      "autoCodexTimeoutSeconds": 300,
+      "autoCodexHeartbeatSeconds": 45,
+      "autoCodexDebug": false,
+      "autoCodexSenderAllowlist": ["@admin:your-server"],
+      "autoCodexProgressUpdates": true,
+      "autoCodexStateDir": ".matrix-agent-state",
+      "autoCodexCwd": "/abs/path/to/project",
+      "autoCodexAckTemplate": "Received. Starting Codex job {{job_id}}.",
+      "autoCodexProgressTemplate": "Codex {{phase}} (job {{job_id}}).",
+      "autoCodexContextTailLines": 60
+    }
+  }
+}
