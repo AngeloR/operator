@@ -2348,22 +2348,37 @@ async function runAutoCodexProjectWorker(
           void pending.finally(() => statusPromises.delete(pending));
         };
         const queueStreamPreview = (preview: string): void => {
-          const pending = enqueueAutoCodexMessage(
-            autoCodexRedis,
-            autoProject,
-            preview,
-            "markdown",
-          )
-            .then(() => undefined)
-            .catch((error: unknown) => {
-              const detail = error instanceof Error ? error.message : String(error);
-              console.warn(
-                `auto-codex stream failed for ${autoProject.projectKey} (${jobId}): ${detail}`,
-              );
-            });
+          const normalized = preview.replace(/\r\n/g, "\n");
+          if (!/\S/.test(normalized)) {
+            return;
+          }
 
-          statusPromises.add(pending);
-          void pending.finally(() => statusPromises.delete(pending));
+          for (
+            let start = 0;
+            start < normalized.length;
+            start += AUTO_CODEX_MAX_MESSAGE_CHARS
+          ) {
+            const chunk = normalized.slice(
+              start,
+              start + AUTO_CODEX_MAX_MESSAGE_CHARS,
+            );
+            const pending = enqueueAutoCodexMessage(
+              autoCodexRedis,
+              autoProject,
+              chunk,
+              "markdown",
+            )
+              .then(() => undefined)
+              .catch((error: unknown) => {
+                const detail = error instanceof Error ? error.message : String(error);
+                console.warn(
+                  `auto-codex stream failed for ${autoProject.projectKey} (${jobId}): ${detail}`,
+                );
+              });
+
+            statusPromises.add(pending);
+            void pending.finally(() => statusPromises.delete(pending));
+          }
         };
 
         let heartbeatTimer: NodeJS.Timeout | null = null;
@@ -2402,19 +2417,23 @@ async function runAutoCodexProjectWorker(
             return;
           }
 
-          const preview = streamText
-            .slice(Math.max(0, streamText.length - AUTO_CODEX_STREAM_PREVIEW_MAX_CHARS))
-            .replace(/\s+/g, " ")
-            .trim();
-
-          if (!preview) {
-            return;
-          }
-
-          const previewMessage = truncateInline(preview, 280);
           if (autoProject.verbosity === "thinking") {
-            queueStreamPreview(previewMessage);
+            const delta = streamText.slice(lastStreamSentChars);
+            if (!delta.trim()) {
+              return;
+            }
+            queueStreamPreview(delta);
           } else {
+            const preview = streamText
+              .slice(Math.max(0, streamText.length - AUTO_CODEX_STREAM_PREVIEW_MAX_CHARS))
+              .replace(/\s+/g, " ")
+              .trim();
+
+            if (!preview) {
+              return;
+            }
+
+            const previewMessage = truncateInline(preview, 280);
             const phase = `${latestStreamPhase}: ${previewMessage}`;
             queueStatus(phase, "stream");
           }
