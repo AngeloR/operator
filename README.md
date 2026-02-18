@@ -74,7 +74,7 @@ Notes:
 - `autoCodexHeartbeatSeconds` defaults to `45`; for timed runs this heartbeat is used for non-Codex commands, while `codex exec` progress is stream-driven from JSON events. Set `0` to disable timed heartbeats.
 - `autoCodexVerbosity` defaults to `"output"` and controls status visibility:
 - `"debug"`: emit full status stream (ack + planning/executing/stream/heartbeat/finalizing) plus final output.
-- `"thinking"`: emit parsed streamed JSON content updates plus final output.
+- `"thinking"`: emit only parsed streamed JSON content updates (no job IDs/status labels) plus final output.
 - `"output"`: emit only `Received.` acknowledgement plus final output.
 - `autoCodexDebug` is still accepted as a legacy fallback (`true -> "debug"`, `false -> "output"`), but `autoCodexVerbosity` takes precedence.
 - `autoCodexCwd` sets the working directory used for `autoCodexCommand` and is validated at daemon startup. If omitted, relay-core uses its own current working directory.

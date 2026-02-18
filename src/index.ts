@@ -2042,7 +2042,7 @@ Project-level autoCodex (optional):
   autoCodexStateDir: ".matrix-agent-state"            # default
   autoCodexCwd: "/abs/path/to/project"                # default: current relay-core cwd
   autoCodexAckTemplate: "Starting Codex {{job_id}}."   # used when autoCodexVerbosity=debug
-  autoCodexProgressTemplate: "Codex {{phase}} ({{job_id}})." # used for debug + thinking stream updates
+  autoCodexProgressTemplate: "Codex {{phase}} ({{job_id}})." # used for debug status updates
   autoCodexContextTailLines: 60                        # default
 
 Environment:
@@ -2347,6 +2347,24 @@ async function runAutoCodexProjectWorker(
           statusPromises.add(pending);
           void pending.finally(() => statusPromises.delete(pending));
         };
+        const queueStreamPreview = (preview: string): void => {
+          const pending = enqueueAutoCodexMessage(
+            autoCodexRedis,
+            autoProject,
+            preview,
+            "markdown",
+          )
+            .then(() => undefined)
+            .catch((error: unknown) => {
+              const detail = error instanceof Error ? error.message : String(error);
+              console.warn(
+                `auto-codex stream failed for ${autoProject.projectKey} (${jobId}): ${detail}`,
+              );
+            });
+
+          statusPromises.add(pending);
+          void pending.finally(() => statusPromises.delete(pending));
+        };
 
         let heartbeatTimer: NodeJS.Timeout | null = null;
         if (heartbeatEnabled) {
@@ -2393,8 +2411,13 @@ async function runAutoCodexProjectWorker(
             return;
           }
 
-          const phase = `${latestStreamPhase}: ${truncateInline(preview, 280)}`;
-          queueStatus(phase, "stream");
+          const previewMessage = truncateInline(preview, 280);
+          if (autoProject.verbosity === "thinking") {
+            queueStreamPreview(previewMessage);
+          } else {
+            const phase = `${latestStreamPhase}: ${previewMessage}`;
+            queueStatus(phase, "stream");
+          }
           lastStreamSentPhase = latestStreamPhase;
           lastStreamSentAt = now;
           lastStreamSentChars = streamText.length;
