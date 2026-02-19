@@ -2,7 +2,7 @@
 
 `matrix-agent` is now the **relay core**.
 
-It bridges Matrix <-> Redis and exposes a small HTTP facade, with optional built-in autoCodex workers per project.
+It bridges Matrix <-> Redis and exposes a small HTTP facade, with optional built-in autoOpenCode workers per project.
 
 ## Architecture
 
@@ -10,7 +10,7 @@ Single relay-core process:
 
 1. Matrix ingress: room message -> Redis `[project]:user`
 2. Matrix egress: Redis `[project]:agent` -> room message
-3. Optional autoCodex workers consume `[project]:user` and publish to `[project]:agent`
+3. Optional autoOpenCode workers consume `[project]:user` and publish to `[project]:agent`
 4. HTTP facade (`/v1/agent/poll`, `/v1/agent/send`) for external agent processes
 
 ## Install
@@ -36,19 +36,19 @@ cp config.example.json config.json
     },
     "matrix-router": {
       "roomId": "!anotherRoomId:your-server",
-      "autoCodex": true,
-      "autoCodexAgent": "codex",
-      "autoCodexCommand": ["codex", "exec", "--skip-git-repo-check"],
-      "autoCodexTimeoutSeconds": 300,
-      "autoCodexHeartbeatSeconds": 45,
-      "autoCodexVerbosity": "output",
-      "autoCodexSenderAllowlist": ["@admin:your-server"],
-      "autoCodexProgressUpdates": true,
-      "autoCodexStateDir": ".matrix-agent-state",
-      "autoCodexCwd": "/abs/path/to/project",
-      "autoCodexAckTemplate": "Received. Starting Codex job {{job_id}}.",
-      "autoCodexProgressTemplate": "Codex {{phase}} (job {{job_id}}).",
-      "autoCodexContextTailLines": 60
+      "autoOpenCode": true,
+      "autoOpenCodeAgent": "opencode",
+      "autoOpenCodeCommand": ["opencode", "run"],
+      "autoOpenCodeTimeoutSeconds": 300,
+      "autoOpenCodeHeartbeatSeconds": 45,
+      "autoOpenCodeVerbosity": "output",
+      "autoOpenCodeSenderAllowlist": ["@admin:your-server"],
+      "autoOpenCodeProgressUpdates": true,
+      "autoOpenCodeStateDir": ".matrix-agent-state",
+      "autoOpenCodeCwd": "/abs/path/to/project",
+      "autoOpenCodeAckTemplate": "Received. Starting OpenCode job {{job_id}}.",
+      "autoOpenCodeProgressTemplate": "OpenCode {{phase}} (job {{job_id}}).",
+      "autoOpenCodeContextTailLines": 60
     }
   }
 }
@@ -59,21 +59,22 @@ Notes:
 - `/v1/metrics` is public (same access model as `/v1/health`).
 - `adminUserIds` gates which Matrix senders are enqueued into `[project]:user`.
 - Sync checkpoint is stored at Redis key `matrix-agent:sync:next-batch:v1`.
-- `autoCodex` is optional per project. When enabled, relay-core consumes `[project]:user`, runs the configured command with a rolling context bundle on stdin, and sends replies to `[project]:agent`.
+- `autoOpenCode` is optional per project. When enabled, relay-core consumes `[project]:user`, runs the configured command with a rolling context bundle on stdin, and sends replies to `[project]:agent`.
+- Legacy `autoCodex*` keys are no longer supported; startup fails fast if they are still present.
 - Outbound Matrix messages are sent as provided (no automatic `[agent]` prefix in message text).
-- `autoCodexSenderAllowlist` is required when `autoCodex` is enabled.
-- `autoCodexCommand` executes on the host with this process's permissions; treat it as privileged configuration.
-- `autoCodexAgent` is an optional internal agent label used for context/state partitioning.
-- For `codex exec`, relay automatically enables `--json` and writes `--output-last-message` to a temporary state file unless you already pass those flags in `autoCodexCommand`.
-- `autoCodexTimeoutSeconds` defaults to `300`; set `0` to disable timeout and force a 15-minute heartbeat while Codex is running.
-- `autoCodexHeartbeatSeconds` defaults to `45`; for timed runs this heartbeat is used for non-Codex commands, while `codex exec` progress is stream-driven from JSON events. Set `0` to disable timed heartbeats.
-- `autoCodexVerbosity` defaults to `"output"` and controls status visibility:
+- Relay converts markdown payloads to Matrix HTML (`org.matrix.custom.html`) for outbound messages.
+- `autoOpenCodeSenderAllowlist` is required when `autoOpenCode` is enabled.
+- `autoOpenCodeCommand` executes on the host with this process's permissions; treat it as privileged configuration.
+- `autoOpenCodeAgent` is an optional internal agent label used for context/state partitioning.
+- `autoOpenCodeCommand` must invoke `opencode run`; relay automatically enforces `--format json` and adds `--thinking` for `thinking` / `thinking-complete` verbosity modes.
+- `autoOpenCodeTimeoutSeconds` defaults to `300`; set `0` to disable timeout and force a 15-minute heartbeat while OpenCode is running.
+- `autoOpenCodeHeartbeatSeconds` defaults to `45`; heartbeat updates are sent in debug mode for long-running jobs. Set `0` to disable timed heartbeats.
+- `autoOpenCodeVerbosity` defaults to `"output"` and controls status visibility:
 - `"debug"`: emit full status stream (ack + planning/executing/stream/heartbeat/finalizing) plus final output.
-- `"thinking"`: emit title-only thinking updates (one line per detected thinking section) plus final output.
+- `"thinking"`: emit title-only thinking updates (one line per reasoning section title) plus final output.
 - `"thinking-complete"`: emit full thinking stream text and suppress duplicate final output when a stream already produced content.
 - `"output"`: emit only `Received.` acknowledgement plus final output.
-- `autoCodexDebug` is still accepted as a legacy fallback (`true -> "debug"`, `false -> "output"`), but `autoCodexVerbosity` takes precedence.
-- `autoCodexCwd` sets the working directory used for `autoCodexCommand` and is validated at daemon startup. If omitted, relay-core uses its own current working directory.
+- `autoOpenCodeCwd` sets the working directory used for `autoOpenCodeCommand` and is validated at daemon startup. If omitted, relay-core uses its own current working directory.
 
 ## Run
 

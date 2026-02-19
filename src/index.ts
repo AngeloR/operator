@@ -1,8 +1,8 @@
 import config from "../config.json";
-import { RedisClient } from "bun";
 import { marked } from "marked";
+import { RedisClient } from "bun";
 import { spawn } from "node:child_process";
-import { appendFile, mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import {
   type MessageFormat,
@@ -17,11 +17,10 @@ import {
   appendCapturedOutput,
   appendStreamText,
   extractJsonLinesText,
-  extractStreamText,
-  extractThinkingTitles,
   formatThinkingStreamDelta,
+  parseOpenCodeStreamEvent,
   tryDecodeJsonMessageText,
-} from "./codex-stream";
+} from "./opencode-stream";
 import {
   buildMetricsSnapshot,
   collectQueueDepth,
@@ -34,20 +33,19 @@ import {
 type ProjectConfig = {
   roomId: string;
   prefix?: string;
-  autoCodex?: boolean;
-  autoCodexAgent?: string;
-  autoCodexCommand?: string[];
-  autoCodexTimeoutSeconds?: number;
-  autoCodexHeartbeatSeconds?: number;
-  autoCodexVerbosity?: string;
-  autoCodexDebug?: boolean;
-  autoCodexProgressUpdates?: boolean;
-  autoCodexStateDir?: string;
-  autoCodexCwd?: string;
-  autoCodexSenderAllowlist?: string[];
-  autoCodexAckTemplate?: string;
-  autoCodexProgressTemplate?: string;
-  autoCodexContextTailLines?: number;
+  autoOpenCode?: boolean;
+  autoOpenCodeAgent?: string;
+  autoOpenCodeCommand?: string[];
+  autoOpenCodeTimeoutSeconds?: number;
+  autoOpenCodeHeartbeatSeconds?: number;
+  autoOpenCodeVerbosity?: string;
+  autoOpenCodeProgressUpdates?: boolean;
+  autoOpenCodeStateDir?: string;
+  autoOpenCodeCwd?: string;
+  autoOpenCodeSenderAllowlist?: string[];
+  autoOpenCodeAckTemplate?: string;
+  autoOpenCodeProgressTemplate?: string;
+  autoOpenCodeContextTailLines?: number;
 };
 
 type AppConfig = {
@@ -66,7 +64,7 @@ type AppConfig = {
 };
 
 type QueueDirection = "agent" | "user";
-type AutoCodexVerbosity = "debug" | "thinking" | "thinking-complete" | "output";
+type AutoOpenCodeVerbosity = "debug" | "thinking" | "thinking-complete" | "output";
 
 type ParsedMessage = {
   body: string;
@@ -146,14 +144,14 @@ type AgentSendRequest = {
   agent?: string;
 };
 
-type AutoCodexProject = {
+type AutoOpenCodeProject = {
   projectKey: string;
   roomId: string;
   agent: string;
   command: string[];
   timeoutMs: number | null;
   heartbeatMs: number;
-  verbosity: AutoCodexVerbosity;
+  verbosity: AutoOpenCodeVerbosity;
   progressUpdates: boolean;
   stateDir: string;
   cwd: string;
@@ -176,14 +174,11 @@ type CommandStreamHandlers = {
   onStderrChunk?: (chunk: string) => void;
 };
 
-type PreparedAutoCodexCommand = {
+type PreparedAutoOpenCodeCommand = {
   command: string[];
-  outputLastMessagePath: string | null;
-  cleanupOutputLastMessagePath: boolean;
-  jsonStreamEnabled: boolean;
 };
 
-type AutoCodexStatePaths = {
+type AutoOpenCodeStatePaths = {
   rootDir: string;
   inboxLogPath: string;
   outboxLogPath: string;
@@ -191,34 +186,35 @@ type AutoCodexStatePaths = {
   currentContextPath: string;
 };
 
-type AutoCodexStreamHandlers = {
+type AutoOpenCodeStreamHandlers = {
   onStreamPhase?: (phase: string) => void;
   onStreamText?: (text: string) => void;
+  onThinkingTitle?: (title: string) => void;
 };
 
 const cfg = config as AppConfig;
 const projects = cfg.projects ?? {};
 const SYNC_TOKEN_KEY = "matrix-agent:sync:next-batch:v1";
-const DEFAULT_AUTO_CODEX_COMMAND = ["codex", "exec", "--skip-git-repo-check"];
-const DEFAULT_AUTO_CODEX_TIMEOUT_SECONDS = 300;
-const DEFAULT_AUTO_CODEX_HEARTBEAT_SECONDS = 45;
-const AUTO_CODEX_INFINITE_TIMEOUT_HEARTBEAT_MS = 15 * 60 * 1000;
-const DEFAULT_AUTO_CODEX_VERBOSITY: AutoCodexVerbosity = "output";
-const DEFAULT_AUTO_CODEX_PROGRESS_UPDATES = true;
-const DEFAULT_AUTO_CODEX_STATE_DIR = ".matrix-agent-state";
-const DEFAULT_AUTO_CODEX_ACK_TEMPLATE =
-  "Received your message. Starting Codex job {{job_id}}.";
-const DEFAULT_AUTO_CODEX_PROGRESS_TEMPLATE = "Codex {{phase}} (job {{job_id}}).";
-const DEFAULT_AUTO_CODEX_CONTEXT_TAIL_LINES = 60;
-const AUTO_CODEX_MAX_MESSAGE_CHARS = 16_000;
-const AUTO_CODEX_MAX_CONTEXT_CHARS = 24_000;
-const AUTO_CODEX_DEDUP_WINDOW_MS = 30 * 60 * 1000;
-const AUTO_CODEX_DEDUP_MAX_IDS = 2000;
-const AUTO_CODEX_STREAM_UPDATE_MIN_INTERVAL_MS = 5000;
-const AUTO_CODEX_STREAM_UPDATE_MIN_CHARS = 200;
-const AUTO_CODEX_STREAM_PREVIEW_MAX_CHARS = 4000;
-const AUTO_CODEX_WORKER_RESTART_BASE_DELAY_MS = 1000;
-const AUTO_CODEX_WORKER_RESTART_MAX_DELAY_MS = 30_000;
+const DEFAULT_AUTO_OPENCODE_COMMAND = ["opencode", "run"];
+const DEFAULT_AUTO_OPENCODE_TIMEOUT_SECONDS = 300;
+const DEFAULT_AUTO_OPENCODE_HEARTBEAT_SECONDS = 45;
+const AUTO_OPENCODE_INFINITE_TIMEOUT_HEARTBEAT_MS = 15 * 60 * 1000;
+const DEFAULT_AUTO_OPENCODE_VERBOSITY: AutoOpenCodeVerbosity = "output";
+const DEFAULT_AUTO_OPENCODE_PROGRESS_UPDATES = true;
+const DEFAULT_AUTO_OPENCODE_STATE_DIR = ".matrix-agent-state";
+const DEFAULT_AUTO_OPENCODE_ACK_TEMPLATE =
+  "Received your message. Starting OpenCode job {{job_id}}.";
+const DEFAULT_AUTO_OPENCODE_PROGRESS_TEMPLATE = "OpenCode {{phase}} (job {{job_id}}).";
+const DEFAULT_AUTO_OPENCODE_CONTEXT_TAIL_LINES = 60;
+const AUTO_OPENCODE_MAX_MESSAGE_CHARS = 16_000;
+const AUTO_OPENCODE_MAX_CONTEXT_CHARS = 24_000;
+const AUTO_OPENCODE_DEDUP_WINDOW_MS = 30 * 60 * 1000;
+const AUTO_OPENCODE_DEDUP_MAX_IDS = 2000;
+const AUTO_OPENCODE_STREAM_UPDATE_MIN_INTERVAL_MS = 5000;
+const AUTO_OPENCODE_STREAM_UPDATE_MIN_CHARS = 200;
+const AUTO_OPENCODE_STREAM_PREVIEW_MAX_CHARS = 4000;
+const AUTO_OPENCODE_WORKER_RESTART_BASE_DELAY_MS = 1000;
+const AUTO_OPENCODE_WORKER_RESTART_MAX_DELAY_MS = 30_000;
 
 if (!cfg.homeserverUrl || !cfg.accessToken) {
   throw new Error("config.json must include homeserverUrl and accessToken");
@@ -276,27 +272,27 @@ function toPlainHtml(text: string): string {
   return Bun.escapeHTML(text).replace(/\n/g, "<br>\n");
 }
 
-function toMarkdownHtml(markdown: string): string {
-  const renderer = new marked.Renderer();
-  renderer.html = ({ text }) => Bun.escapeHTML(text);
-
-  return marked(markdown, {
+function toMarkdownHtml(text: string): string {
+  const rendered = marked.parse(text, {
     async: false,
-    gfm: true,
     breaks: true,
-    renderer,
+    gfm: true,
   });
+
+  return typeof rendered === "string" ? rendered : toPlainHtml(text);
 }
 
 function buildMatrixContent(message: ParsedMessage): MatrixMessageContent {
+  const formattedBody =
+    message.format === "markdown"
+      ? toMarkdownHtml(message.body)
+      : toPlainHtml(message.body);
+
   return {
     msgtype: "m.text",
     body: message.body,
     format: "org.matrix.custom.html",
-    formatted_body:
-      message.format === "markdown"
-        ? toMarkdownHtml(message.body)
-        : toPlainHtml(message.body),
+    formatted_body: formattedBody,
   };
 }
 
@@ -304,7 +300,7 @@ function queueKey(projectKey: string, direction: QueueDirection): string {
   return `${projectKey}:${direction}`;
 }
 
-function parseAutoCodexBoolean(
+function parseAutoOpenCodeBoolean(
   value: unknown,
   fallback: boolean,
   fieldName: string,
@@ -320,17 +316,17 @@ function parseAutoCodexBoolean(
   return value;
 }
 
-function parseAutoCodexVerbosity(
+function parseAutoOpenCodeVerbosity(
   value: unknown,
-  fallback: AutoCodexVerbosity,
-): AutoCodexVerbosity {
+  fallback: AutoOpenCodeVerbosity,
+): AutoOpenCodeVerbosity {
   if (value === undefined) {
     return fallback;
   }
 
   const parsed = nonEmptyText(value)?.toLowerCase();
   if (!parsed) {
-    throw new Error("autoCodexVerbosity must be a non-empty string");
+    throw new Error("autoOpenCodeVerbosity must be a non-empty string");
   }
 
   if (
@@ -340,14 +336,14 @@ function parseAutoCodexVerbosity(
     parsed !== "output"
   ) {
     throw new Error(
-      "autoCodexVerbosity must be one of: debug, thinking, thinking-complete, output",
+      "autoOpenCodeVerbosity must be one of: debug, thinking, thinking-complete, output",
     );
   }
 
   return parsed;
 }
 
-function parseAutoCodexString(
+function parseAutoOpenCodeString(
   value: unknown,
   fallback: string,
   fieldName: string,
@@ -364,13 +360,13 @@ function parseAutoCodexString(
   return parsed;
 }
 
-function parseAutoCodexCommand(value: unknown): string[] | null {
+function parseAutoOpenCodeCommand(value: unknown): string[] | null {
   if (value === undefined) {
     return null;
   }
 
   if (!Array.isArray(value)) {
-    throw new Error("autoCodexCommand must be an array of strings");
+    throw new Error("autoOpenCodeCommand must be an array of strings");
   }
 
   const command = value
@@ -378,69 +374,69 @@ function parseAutoCodexCommand(value: unknown): string[] | null {
     .filter((item) => item.length > 0);
 
   if (command.length === 0) {
-    throw new Error("autoCodexCommand must include at least one token");
+    throw new Error("autoOpenCodeCommand must include at least one token");
   }
 
   return command;
 }
 
-function parseAutoCodexCwd(value: unknown): string {
+function parseAutoOpenCodeCwd(value: unknown): string {
   if (value === undefined) {
     return process.cwd();
   }
 
   const parsed = nonEmptyText(value);
   if (!parsed) {
-    throw new Error("autoCodexCwd must be a non-empty string");
+    throw new Error("autoOpenCodeCwd must be a non-empty string");
   }
 
   return resolve(parsed);
 }
 
-function parseAutoCodexTimeoutSeconds(value: unknown): number {
+function parseAutoOpenCodeTimeoutSeconds(value: unknown): number {
   if (value === undefined) {
-    return DEFAULT_AUTO_CODEX_TIMEOUT_SECONDS;
+    return DEFAULT_AUTO_OPENCODE_TIMEOUT_SECONDS;
   }
 
   const n = Number(value);
   if (!Number.isInteger(n) || n < 0 || n > 3600) {
     throw new Error(
-      "autoCodexTimeoutSeconds must be an integer between 0 and 3600 (0 disables timeout)",
+      "autoOpenCodeTimeoutSeconds must be an integer between 0 and 3600 (0 disables timeout)",
     );
   }
 
   return n;
 }
 
-function parseAutoCodexHeartbeatSeconds(value: unknown): number {
+function parseAutoOpenCodeHeartbeatSeconds(value: unknown): number {
   if (value === undefined) {
-    return DEFAULT_AUTO_CODEX_HEARTBEAT_SECONDS;
+    return DEFAULT_AUTO_OPENCODE_HEARTBEAT_SECONDS;
   }
 
   const n = Number(value);
   if (!Number.isInteger(n) || n < 0 || n > 3600) {
-    throw new Error("autoCodexHeartbeatSeconds must be an integer between 0 and 3600");
+    throw new Error("autoOpenCodeHeartbeatSeconds must be an integer between 0 and 3600");
   }
 
   return n;
 }
 
-function parseAutoCodexContextTailLines(value: unknown): number {
+function parseAutoOpenCodeContextTailLines(value: unknown): number {
   if (value === undefined) {
-    return DEFAULT_AUTO_CODEX_CONTEXT_TAIL_LINES;
+    return DEFAULT_AUTO_OPENCODE_CONTEXT_TAIL_LINES;
   }
 
   const n = Number(value);
   if (!Number.isInteger(n) || n < 10 || n > 500) {
-    throw new Error("autoCodexContextTailLines must be an integer between 10 and 500");
+    throw new Error("autoOpenCodeContextTailLines must be an integer between 10 and 500");
   }
 
   return n;
 }
 
-function parseAutoCodexSenderAllowlist(value: unknown): Set<string> {
+function parseAutoOpenCodeSenderAllowlist(value: unknown): Set<string> {
   if (!Array.isArray(value)) {
-    throw new Error("autoCodexSenderAllowlist must be an array of user IDs");
+    throw new Error("autoOpenCodeSenderAllowlist must be an array of user IDs");
   }
 
   const ids = value
@@ -448,10 +444,39 @@ function parseAutoCodexSenderAllowlist(value: unknown): Set<string> {
     .filter((item) => item.length > 0);
 
   if (ids.length === 0) {
-    throw new Error("autoCodexSenderAllowlist must include at least one user ID");
+    throw new Error("autoOpenCodeSenderAllowlist must include at least one user ID");
   }
 
   return new Set(ids);
+}
+
+function assertNoLegacyAutoCodexConfig(projectKey: string, project: ProjectConfig): void {
+  const legacyKeys = [
+    "autoCodex",
+    "autoCodexAgent",
+    "autoCodexCommand",
+    "autoCodexTimeoutSeconds",
+    "autoCodexHeartbeatSeconds",
+    "autoCodexVerbosity",
+    "autoCodexDebug",
+    "autoCodexProgressUpdates",
+    "autoCodexStateDir",
+    "autoCodexCwd",
+    "autoCodexSenderAllowlist",
+    "autoCodexAckTemplate",
+    "autoCodexProgressTemplate",
+    "autoCodexContextTailLines",
+  ];
+
+  const rawProject = project as Record<string, unknown>;
+  const present = legacyKeys.filter((key) => rawProject[key] !== undefined);
+  if (present.length === 0) {
+    return;
+  }
+
+  throw new Error(
+    `project "${projectKey}" uses removed config keys: ${present.join(", ")}. Rename them to autoOpenCode* equivalents.`,
+  );
 }
 
 function renderTemplate(
@@ -492,164 +517,112 @@ function commandHasOption(
   return false;
 }
 
-function readCommandOptionValue(
-  command: string[],
-  longName: string,
-  shortName?: string,
-): string | null {
-  for (let i = 0; i < command.length; i += 1) {
-    const token = command[i];
-    if (!token) {
-      continue;
-    }
-
-    const longPrefix = `--${longName}=`;
-    if (token.startsWith(longPrefix)) {
-      return token.slice(longPrefix.length);
-    }
-
-    if (token === `--${longName}`) {
-      const next = command[i + 1];
-      return typeof next === "string" ? next : null;
-    }
-
-    if (shortName) {
-      const shortPrefix = `-${shortName}=`;
-      if (token.startsWith(shortPrefix)) {
-        return token.slice(shortPrefix.length);
-      }
-      if (token === `-${shortName}`) {
-        const next = command[i + 1];
-        return typeof next === "string" ? next : null;
-      }
-    }
-  }
-
-  return null;
-}
-
-function isCodexExecCommand(command: string[]): boolean {
+function isOpenCodeRunCommand(command: string[]): boolean {
   const executable = command[0];
   if (!executable) {
     return false;
   }
 
   const fileName = basename(executable).toLowerCase();
-  if (fileName !== "codex" && fileName !== "codex.exe") {
+  if (fileName !== "opencode" && fileName !== "opencode.exe") {
     return false;
   }
 
-  return command.some((token) => token === "exec" || token === "e");
+  return command.some((token) => token === "run" || token === "r");
 }
 
-function prepareAutoCodexCommand(
+function prepareAutoOpenCodeCommand(
   command: string[],
-  cwd: string,
-  defaultOutputLastMessagePath: string,
-): PreparedAutoCodexCommand {
-  const prepared: PreparedAutoCodexCommand = {
+  verbosity: AutoOpenCodeVerbosity,
+): PreparedAutoOpenCodeCommand {
+  if (!isOpenCodeRunCommand(command)) {
+    throw new Error("autoOpenCodeCommand must invoke `opencode run`");
+  }
+
+  const prepared: PreparedAutoOpenCodeCommand = {
     command: [...command],
-    outputLastMessagePath: null,
-    cleanupOutputLastMessagePath: false,
-    jsonStreamEnabled: false,
   };
 
-  if (!isCodexExecCommand(command)) {
-    return prepared;
+  if (!commandHasOption(prepared.command, "format", "f")) {
+    prepared.command.push("--format", "json");
   }
 
-  prepared.jsonStreamEnabled = true;
-  if (!commandHasOption(prepared.command, "json")) {
-    prepared.command.push("--json");
-  }
-
-  const configuredPath = readCommandOptionValue(
-    prepared.command,
-    "output-last-message",
-    "o",
-  );
-  if (configuredPath) {
-    prepared.outputLastMessagePath = resolve(cwd, configuredPath);
-  } else {
-    prepared.outputLastMessagePath = defaultOutputLastMessagePath;
-    prepared.cleanupOutputLastMessagePath = true;
-    prepared.command.push("--output-last-message", defaultOutputLastMessagePath);
+  const needsThinking = verbosity === "thinking" || verbosity === "thinking-complete";
+  if (needsThinking && !commandHasOption(prepared.command, "thinking")) {
+    prepared.command.push("--thinking");
   }
 
   return prepared;
 }
 
-function buildAutoCodexMap(): Map<string, AutoCodexProject> {
-  const map = new Map<string, AutoCodexProject>();
+function buildAutoOpenCodeMap(): Map<string, AutoOpenCodeProject> {
+  const map = new Map<string, AutoOpenCodeProject>();
 
   for (const [projectKey, project] of Object.entries(projects)) {
-    if (project.autoCodex !== true) {
+    assertNoLegacyAutoCodexConfig(projectKey, project);
+
+    if (project.autoOpenCode !== true) {
       continue;
     }
 
     const roomId = nonEmptyText(project.roomId);
     if (!roomId) {
-      throw new Error(`project "${projectKey}" has autoCodex enabled but no roomId`);
+      throw new Error(`project "${projectKey}" has autoOpenCode enabled but no roomId`);
     }
 
-    const command = parseAutoCodexCommand(project.autoCodexCommand) ??
-      DEFAULT_AUTO_CODEX_COMMAND;
-    const timeoutSeconds = parseAutoCodexTimeoutSeconds(
-      project.autoCodexTimeoutSeconds,
+    const command = parseAutoOpenCodeCommand(project.autoOpenCodeCommand) ??
+      DEFAULT_AUTO_OPENCODE_COMMAND;
+    if (!isOpenCodeRunCommand(command)) {
+      throw new Error(
+        `project "${projectKey}" has invalid autoOpenCodeCommand: expected opencode run`,
+      );
+    }
+    const timeoutSeconds = parseAutoOpenCodeTimeoutSeconds(
+      project.autoOpenCodeTimeoutSeconds,
     );
-    const heartbeatSeconds = parseAutoCodexHeartbeatSeconds(
-      project.autoCodexHeartbeatSeconds,
+    const heartbeatSeconds = parseAutoOpenCodeHeartbeatSeconds(
+      project.autoOpenCodeHeartbeatSeconds,
     );
-    const verbosity = project.autoCodexVerbosity !== undefined
-      ? parseAutoCodexVerbosity(
-        project.autoCodexVerbosity,
-        DEFAULT_AUTO_CODEX_VERBOSITY,
-      )
-      : project.autoCodexDebug !== undefined
-      ? parseAutoCodexBoolean(
-        project.autoCodexDebug,
-        false,
-        "autoCodexDebug",
-      )
-        ? "debug"
-        : DEFAULT_AUTO_CODEX_VERBOSITY
-      : DEFAULT_AUTO_CODEX_VERBOSITY;
-    const progressUpdates = parseAutoCodexBoolean(
-      project.autoCodexProgressUpdates,
-      DEFAULT_AUTO_CODEX_PROGRESS_UPDATES,
-      "autoCodexProgressUpdates",
+    const verbosity = parseAutoOpenCodeVerbosity(
+      project.autoOpenCodeVerbosity,
+      DEFAULT_AUTO_OPENCODE_VERBOSITY,
     );
-    const stateDir = parseAutoCodexString(
-      project.autoCodexStateDir,
-      DEFAULT_AUTO_CODEX_STATE_DIR,
-      "autoCodexStateDir",
+    const progressUpdates = parseAutoOpenCodeBoolean(
+      project.autoOpenCodeProgressUpdates,
+      DEFAULT_AUTO_OPENCODE_PROGRESS_UPDATES,
+      "autoOpenCodeProgressUpdates",
     );
-    const cwd = parseAutoCodexCwd(project.autoCodexCwd);
-    const senderAllowlist = parseAutoCodexSenderAllowlist(
-      project.autoCodexSenderAllowlist,
+    const stateDir = parseAutoOpenCodeString(
+      project.autoOpenCodeStateDir,
+      DEFAULT_AUTO_OPENCODE_STATE_DIR,
+      "autoOpenCodeStateDir",
     );
-    const ackTemplate = parseAutoCodexString(
-      project.autoCodexAckTemplate,
-      DEFAULT_AUTO_CODEX_ACK_TEMPLATE,
-      "autoCodexAckTemplate",
+    const cwd = parseAutoOpenCodeCwd(project.autoOpenCodeCwd);
+    const senderAllowlist = parseAutoOpenCodeSenderAllowlist(
+      project.autoOpenCodeSenderAllowlist,
     );
-    const progressTemplate = parseAutoCodexString(
-      project.autoCodexProgressTemplate,
-      DEFAULT_AUTO_CODEX_PROGRESS_TEMPLATE,
-      "autoCodexProgressTemplate",
+    const ackTemplate = parseAutoOpenCodeString(
+      project.autoOpenCodeAckTemplate,
+      DEFAULT_AUTO_OPENCODE_ACK_TEMPLATE,
+      "autoOpenCodeAckTemplate",
     );
-    const contextTailLines = parseAutoCodexContextTailLines(
-      project.autoCodexContextTailLines,
+    const progressTemplate = parseAutoOpenCodeString(
+      project.autoOpenCodeProgressTemplate,
+      DEFAULT_AUTO_OPENCODE_PROGRESS_TEMPLATE,
+      "autoOpenCodeProgressTemplate",
+    );
+    const contextTailLines = parseAutoOpenCodeContextTailLines(
+      project.autoOpenCodeContextTailLines,
     );
 
     const queue = queueKey(projectKey, "user");
-    const autoProject: AutoCodexProject = {
+    const autoProject: AutoOpenCodeProject = {
       projectKey,
       roomId,
       agent:
-        nonEmptyText(project.autoCodexAgent) ??
+        nonEmptyText(project.autoOpenCodeAgent) ??
         nonEmptyText(project.prefix) ??
-        "codex",
+        "opencode",
       command,
       timeoutMs: timeoutSeconds === 0 ? null : timeoutSeconds * 1000,
       heartbeatMs: heartbeatSeconds * 1000,
@@ -669,8 +642,8 @@ function buildAutoCodexMap(): Map<string, AutoCodexProject> {
   return map;
 }
 
-async function validateAutoCodexProjects(
-  projectsByQueue: Map<string, AutoCodexProject>,
+async function validateAutoOpenCodeProjects(
+  projectsByQueue: Map<string, AutoOpenCodeProject>,
 ): Promise<void> {
   for (const autoProject of projectsByQueue.values()) {
     let entry;
@@ -678,13 +651,13 @@ async function validateAutoCodexProjects(
       entry = await stat(autoProject.cwd);
     } catch {
       throw new Error(
-        `project "${autoProject.projectKey}" has invalid autoCodexCwd: directory not found (${autoProject.cwd})`,
+        `project "${autoProject.projectKey}" has invalid autoOpenCodeCwd: directory not found (${autoProject.cwd})`,
       );
     }
 
     if (!entry.isDirectory()) {
       throw new Error(
-        `project "${autoProject.projectKey}" has invalid autoCodexCwd: not a directory (${autoProject.cwd})`,
+        `project "${autoProject.projectKey}" has invalid autoOpenCodeCwd: not a directory (${autoProject.cwd})`,
       );
     }
   }
@@ -1253,7 +1226,7 @@ async function runCommandWithInput(
   });
 }
 
-function resolveAutoCodexStatePaths(autoProject: AutoCodexProject): AutoCodexStatePaths {
+function resolveAutoOpenCodeStatePaths(autoProject: AutoOpenCodeProject): AutoOpenCodeStatePaths {
   const rootDir = join(autoProject.stateDir, autoProject.projectKey, autoProject.agent);
   return {
     rootDir,
@@ -1275,8 +1248,8 @@ async function readTextFileOrEmpty(path: string): Promise<string> {
   }
 }
 
-async function ensureAutoCodexState(autoProject: AutoCodexProject): Promise<AutoCodexStatePaths> {
-  const paths = resolveAutoCodexStatePaths(autoProject);
+async function ensureAutoOpenCodeState(autoProject: AutoOpenCodeProject): Promise<AutoOpenCodeStatePaths> {
+  const paths = resolveAutoOpenCodeStatePaths(autoProject);
   await mkdir(paths.rootDir, { recursive: true });
   return paths;
 }
@@ -1292,8 +1265,8 @@ async function appendTurnLog(
 }
 
 async function buildRollingSummary(
-  paths: AutoCodexStatePaths,
-  autoProject: AutoCodexProject,
+  paths: AutoOpenCodeStatePaths,
+  autoProject: AutoOpenCodeProject,
 ): Promise<string> {
   const inbox = await readTextFileOrEmpty(paths.inboxLogPath);
   const outbox = await readTextFileOrEmpty(paths.outboxLogPath);
@@ -1313,7 +1286,7 @@ async function buildRollingSummary(
     outboxTail || "(none)",
   ].join("\n");
 
-  const truncated = truncateText(summary, AUTO_CODEX_MAX_CONTEXT_CHARS);
+  const truncated = truncateText(summary, AUTO_OPENCODE_MAX_CONTEXT_CHARS);
   await writeFile(paths.rollingSummaryPath, truncated, "utf8");
   return truncated;
 }
@@ -1323,7 +1296,7 @@ function buildCurrentContext(
   summary: string,
   jobId: string,
 ): string {
-  const userBody = truncateText(envelope.body, AUTO_CODEX_MAX_MESSAGE_CHARS);
+  const userBody = truncateText(envelope.body, AUTO_OPENCODE_MAX_MESSAGE_CHARS);
   return truncateText(
     [
       "# Matrix Task",
@@ -1346,21 +1319,21 @@ function buildCurrentContext(
       "",
       "Respond to the user in a concise, actionable way.",
     ].join("\n"),
-    AUTO_CODEX_MAX_CONTEXT_CHARS,
+    AUTO_OPENCODE_MAX_CONTEXT_CHARS,
   );
 }
 
-async function prepareAutoCodexContext(
+async function prepareAutoOpenCodeContext(
   envelope: QueueEnvelope,
-  autoProject: AutoCodexProject,
+  autoProject: AutoOpenCodeProject,
   jobId: string,
-): Promise<{ paths: AutoCodexStatePaths; context: string }> {
-  const paths = await ensureAutoCodexState(autoProject);
+): Promise<{ paths: AutoOpenCodeStatePaths; context: string }> {
+  const paths = await ensureAutoOpenCodeState(autoProject);
   await appendTurnLog(
     paths.inboxLogPath,
     envelope.receivedAt,
     envelope.sender ?? "unknown",
-    truncateText(envelope.body, AUTO_CODEX_MAX_MESSAGE_CHARS),
+    truncateText(envelope.body, AUTO_OPENCODE_MAX_MESSAGE_CHARS),
   );
 
   const summary = await buildRollingSummary(paths, autoProject);
@@ -1369,38 +1342,20 @@ async function prepareAutoCodexContext(
   return { paths, context };
 }
 
-function extractStreamPhase(payload: Record<string, unknown>): string | null {
-  const candidates = [
-    nonEmptyText(payload.type),
-    nonEmptyText(payload.event),
-    nonEmptyText(payload.phase),
-    nonEmptyText(payload.stage),
-    nonEmptyText(payload.status),
-  ];
-
-  for (const candidate of candidates) {
-    if (candidate) {
-      return truncateInline(candidate.replace(/\s+/g, " "), 80);
-    }
-  }
-
-  return null;
-}
-
-async function runAutoCodexPrompt(
+async function runAutoOpenCodePrompt(
   prompt: string,
-  autoProject: AutoCodexProject,
-  outputLastMessagePath: string,
-  handlers?: AutoCodexStreamHandlers,
+  autoProject: AutoOpenCodeProject,
+  handlers?: AutoOpenCodeStreamHandlers,
 ): Promise<string> {
-  const prepared = prepareAutoCodexCommand(
+  const prepared = prepareAutoOpenCodeCommand(
     autoProject.command,
-    autoProject.cwd,
-    outputLastMessagePath,
+    autoProject.verbosity,
   );
 
   let stdoutLineBuffer = "";
   let streamedText = "";
+  let streamedOutputText = "";
+  let streamError: string | null = null;
 
   const parseStdoutLine = (line: string): void => {
     const trimmed = line.trim();
@@ -1420,45 +1375,43 @@ async function runAutoCodexPrompt(
     }
 
     const obj = payload as Record<string, unknown>;
-    const phase = extractStreamPhase(obj);
-    if (phase) {
-      handlers?.onStreamPhase?.(phase);
+    const event = parseOpenCodeStreamEvent(obj);
+    if (event.phase) {
+      handlers?.onStreamPhase?.(event.phase);
     }
 
-    const text = extractStreamText(obj);
-    if (text) {
-      streamedText = appendStreamText(streamedText, text);
-      handlers?.onStreamText?.(text);
+    if (event.reasoningTitle) {
+      handlers?.onThinkingTitle?.(event.reasoningTitle);
+    }
+
+    if (event.text) {
+      streamedText = appendStreamText(streamedText, event.text);
+      if (!event.isReasoning) {
+        streamedOutputText = appendStreamText(streamedOutputText, event.text);
+      }
+      handlers?.onStreamText?.(event.text);
+    }
+
+    if (event.error && !streamError) {
+      streamError = event.error;
     }
   };
 
-  const commandStreamHandlers: CommandStreamHandlers | undefined = prepared.jsonStreamEnabled
-    ? {
-      onStdoutChunk: (chunk: string) => {
-        stdoutLineBuffer += chunk;
-        while (true) {
-          const newlineIndex = stdoutLineBuffer.indexOf("\n");
-          if (newlineIndex < 0) {
-            break;
-          }
-
-          const line = stdoutLineBuffer.slice(0, newlineIndex);
-          stdoutLineBuffer = stdoutLineBuffer.slice(newlineIndex + 1);
-          parseStdoutLine(line);
+  const commandStreamHandlers: CommandStreamHandlers = {
+    onStdoutChunk: (chunk: string) => {
+      stdoutLineBuffer += chunk;
+      while (true) {
+        const newlineIndex = stdoutLineBuffer.indexOf("\n");
+        if (newlineIndex < 0) {
+          break;
         }
-      },
-    }
-    : undefined;
 
-  if (prepared.outputLastMessagePath) {
-    try {
-      await unlink(prepared.outputLastMessagePath);
-    } catch (error: unknown) {
-      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
-        throw error;
+        const line = stdoutLineBuffer.slice(0, newlineIndex);
+        stdoutLineBuffer = stdoutLineBuffer.slice(newlineIndex + 1);
+        parseStdoutLine(line);
       }
-    }
-  }
+    },
+  };
 
   const result = await runCommandWithInput(
     prepared.command,
@@ -1468,75 +1421,50 @@ async function runAutoCodexPrompt(
     commandStreamHandlers,
   );
 
-  if (prepared.jsonStreamEnabled) {
+  if (stdoutLineBuffer.trim()) {
     parseStdoutLine(stdoutLineBuffer);
   }
 
-  try {
-    if (result.timedOut) {
-      const timeoutSeconds = autoProject.timeoutMs === null
-        ? "unknown"
-        : `${Math.round(autoProject.timeoutMs / 1000)}s`;
-      throw new Error(
-        `command timed out after ${timeoutSeconds}`,
-      );
-    }
-
-    if (result.code !== 0) {
-      const stderr = nonEmptyText(result.stderr);
-      const stdout = nonEmptyText(result.stdout);
-      const signalInfo = result.signal ? ` (signal ${result.signal})` : "";
-      throw new Error(
-        `command exited with code ${result.code ?? "null"}${signalInfo}${
-          stderr ? `: ${stderr}` : ""
-        }${!stderr && stdout ? `: ${stdout}` : ""}`,
-      );
-    }
-
-    let output: string | null = null;
-
-    if (prepared.outputLastMessagePath) {
-      const rawOutputFromFile = await readTextFileOrEmpty(
-        prepared.outputLastMessagePath,
-      );
-      const outputFromFile = tryDecodeJsonMessageText(rawOutputFromFile) ??
-        extractJsonLinesText(rawOutputFromFile) ??
-        nonEmptyText(rawOutputFromFile);
-      if (outputFromFile) {
-        output = outputFromFile;
-      }
-    }
-
-    if (!output && prepared.jsonStreamEnabled) {
-      output = nonEmptyText(streamedText) ??
-        extractJsonLinesText(result.stdout) ??
-        nonEmptyText(result.stdout);
-    }
-
-    if (!output) {
-      output = extractJsonLinesText(result.stdout) ??
-        nonEmptyText(result.stdout);
-    }
-
-    if (!output) {
-      throw new Error("command produced no final output");
-    }
-
-    return output;
-  } finally {
-    if (prepared.cleanupOutputLastMessagePath && prepared.outputLastMessagePath) {
-      try {
-        await unlink(prepared.outputLastMessagePath);
-      } catch {
-        // best effort cleanup only
-      }
-    }
+  if (result.timedOut) {
+    const timeoutSeconds = autoProject.timeoutMs === null
+      ? "unknown"
+      : `${Math.round(autoProject.timeoutMs / 1000)}s`;
+    throw new Error(
+      `command timed out after ${timeoutSeconds}`,
+    );
   }
+
+  if (streamError) {
+    throw new Error(streamError);
+  }
+
+  if (result.code !== 0) {
+    const stderr = nonEmptyText(result.stderr);
+    const stdout = nonEmptyText(result.stdout);
+    const signalInfo = result.signal ? ` (signal ${result.signal})` : "";
+    throw new Error(
+      `command exited with code ${result.code ?? "null"}${signalInfo}${
+        stderr ? `: ${stderr}` : ""
+      }${!stderr && stdout ? `: ${stdout}` : ""}`,
+    );
+  }
+
+  const output = nonEmptyText(streamedOutputText) ??
+    nonEmptyText(streamedText) ??
+    extractJsonLinesText(result.stdout) ??
+    tryDecodeJsonMessageText(result.stdout) ??
+    nonEmptyText(result.stdout);
+
+  if (!output) {
+    throw new Error("command produced no final output");
+  }
+
+  return output;
 }
 
-async function enqueueAutoCodexMessage(
+async function enqueueAutoOpenCodeMessage(
   redis: Redis,
-  autoProject: AutoCodexProject,
+  autoProject: AutoOpenCodeProject,
   body: string,
   format: MessageFormat,
 ): Promise<QueueEnvelope> {
@@ -1553,9 +1481,9 @@ async function enqueueAutoCodexMessage(
   return envelope;
 }
 
-async function enqueueAutoCodexStatus(
+async function enqueueAutoOpenCodeStatus(
   redis: Redis,
-  autoProject: AutoCodexProject,
+  autoProject: AutoOpenCodeProject,
   template: string,
   phase: string,
   jobId: string,
@@ -1568,7 +1496,7 @@ async function enqueueAutoCodexStatus(
     sender,
   });
 
-  return enqueueAutoCodexMessage(redis, autoProject, body, "markdown");
+  return enqueueAutoOpenCodeMessage(redis, autoProject, body, "markdown");
 }
 
 function cleanupDedupMap(
@@ -1576,17 +1504,17 @@ function cleanupDedupMap(
   now: number,
 ): void {
   for (const [eventId, ts] of projectDedup.entries()) {
-    if (now - ts > AUTO_CODEX_DEDUP_WINDOW_MS) {
+    if (now - ts > AUTO_OPENCODE_DEDUP_WINDOW_MS) {
       projectDedup.delete(eventId);
     }
   }
 
-  if (projectDedup.size <= AUTO_CODEX_DEDUP_MAX_IDS) {
+  if (projectDedup.size <= AUTO_OPENCODE_DEDUP_MAX_IDS) {
     return;
   }
 
   const entries = [...projectDedup.entries()].sort((a, b) => a[1] - b[1]);
-  const overflow = projectDedup.size - AUTO_CODEX_DEDUP_MAX_IDS;
+  const overflow = projectDedup.size - AUTO_OPENCODE_DEDUP_MAX_IDS;
   for (let i = 0; i < overflow; i += 1) {
     const eventId = entries[i]?.[0];
     if (eventId) {
@@ -1861,20 +1789,20 @@ Auth for /v1/agent/*:
   Authorization: Bearer <token>
   token source: config.agentApiToken(s) or AGENT_API_TOKEN(S)
 
-Project-level autoCodex (optional):
-  autoCodex: true
-  autoCodexAgent: "codex"                              # optional internal agent label (state/context)
-  autoCodexCommand: ["codex","exec","--skip-git-repo-check"]  # relay auto-adds --json + --output-last-message for codex exec
-  autoCodexTimeoutSeconds: 300                         # timeout per message (0 disables timeout + forces 15m heartbeat)
-  autoCodexHeartbeatSeconds: 45                        # periodic heartbeat for non-codex timed runs (0 disables)
-  autoCodexVerbosity: "output"                         # output|thinking|debug (default output)
-  autoCodexSenderAllowlist: ["@admin:your-server"]    # required
-  autoCodexProgressUpdates: true                       # default true
-  autoCodexStateDir: ".matrix-agent-state"            # default
-  autoCodexCwd: "/abs/path/to/project"                # default: current relay-core cwd
-  autoCodexAckTemplate: "Starting Codex {{job_id}}."   # used when autoCodexVerbosity=debug
-  autoCodexProgressTemplate: "Codex {{phase}} ({{job_id}})." # used for debug status updates
-  autoCodexContextTailLines: 60                        # default
+Project-level autoOpenCode (optional):
+  autoOpenCode: true
+  autoOpenCodeAgent: "opencode"                              # optional internal agent label (state/context)
+  autoOpenCodeCommand: ["opencode","run"]                    # relay enforces JSON stream mode and requires opencode run
+  autoOpenCodeTimeoutSeconds: 300                         # timeout per message (0 disables timeout + forces 15m heartbeat)
+  autoOpenCodeHeartbeatSeconds: 45                        # periodic heartbeat for debug mode (0 disables)
+  autoOpenCodeVerbosity: "output"                         # output|thinking|thinking-complete|debug
+  autoOpenCodeSenderAllowlist: ["@admin:your-server"]    # required
+  autoOpenCodeProgressUpdates: true                       # default true
+  autoOpenCodeStateDir: ".matrix-agent-state"            # default
+  autoOpenCodeCwd: "/abs/path/to/project"                # default: current relay-core cwd
+  autoOpenCodeAckTemplate: "Starting OpenCode {{job_id}}."   # used when autoOpenCodeVerbosity=debug
+  autoOpenCodeProgressTemplate: "OpenCode {{phase}} ({{job_id}})." # used for debug status updates
+  autoOpenCodeContextTailLines: 60                        # default
 
 Environment:
   REDIS_URL (default: redis://127.0.0.1:6379/0)
@@ -2042,16 +1970,16 @@ async function runOutboundLoop(
   }
 }
 
-async function runAutoCodexProjectWorker(
-  autoCodexRedis: Redis,
+async function runAutoOpenCodeProjectWorker(
+  autoOpenCodeRedis: Redis,
   userQueue: string,
-  autoProject: AutoCodexProject,
+  autoProject: AutoOpenCodeProject,
 ): Promise<never> {
   const projectDedup = new Map<string, number>();
 
   while (true) {
     try {
-      const popped = await autoCodexRedis.blpop(userQueue, 5);
+      const popped = await autoOpenCodeRedis.blpop(userQueue, 5);
       if (popped === null || popped.length < 2) {
         continue;
       }
@@ -2060,8 +1988,8 @@ async function runAutoCodexProjectWorker(
       const rawPayload = popped[1];
 
       if (poppedQueue !== userQueue) {
-        recordFailure("auto_codex_unexpected_queue", autoProject.projectKey);
-        logEvent("error", "auto_codex.queue.unexpected", {
+        recordFailure("auto_opencode_unexpected_queue", autoProject.projectKey);
+        logEvent("error", "auto_opencode.queue.unexpected", {
           projectKey: autoProject.projectKey,
           queue: poppedQueue,
           expectedQueue: userQueue,
@@ -2078,7 +2006,7 @@ async function runAutoCodexProjectWorker(
       const sender = envelope.sender ?? "unknown";
 
       if (!envelope.sender || !autoProject.senderAllowlist.has(envelope.sender)) {
-        logEvent("info", "auto_codex.message.skipped", {
+        logEvent("info", "auto_opencode.message.skipped", {
           projectKey: autoProject.projectKey,
           queue: poppedQueue,
           sender,
@@ -2089,7 +2017,7 @@ async function runAutoCodexProjectWorker(
       }
 
       if (markAndCheckDuplicate(projectDedup, envelope.id)) {
-        logEvent("info", "auto_codex.message.skipped", {
+        logEvent("info", "auto_opencode.message.skipped", {
           projectKey: autoProject.projectKey,
           queue: poppedQueue,
           sender,
@@ -2111,8 +2039,8 @@ async function runAutoCodexProjectWorker(
       try {
         let ack: QueueEnvelope | null = null;
         if (autoProject.verbosity === "debug") {
-          ack = await enqueueAutoCodexStatus(
-            autoCodexRedis,
+          ack = await enqueueAutoOpenCodeStatus(
+            autoOpenCodeRedis,
             autoProject,
             autoProject.ackTemplate,
             "started",
@@ -2120,8 +2048,8 @@ async function runAutoCodexProjectWorker(
             sender,
           );
         } else if (autoProject.verbosity === "output") {
-          ack = await enqueueAutoCodexMessage(
-            autoCodexRedis,
+          ack = await enqueueAutoOpenCodeMessage(
+            autoOpenCodeRedis,
             autoProject,
             "Received.",
             "plain",
@@ -2129,8 +2057,8 @@ async function runAutoCodexProjectWorker(
         }
 
         if (debugStatusEnabled) {
-          await enqueueAutoCodexStatus(
-            autoCodexRedis,
+          await enqueueAutoOpenCodeStatus(
+            autoOpenCodeRedis,
             autoProject,
             autoProject.progressTemplate,
             "planning",
@@ -2139,15 +2067,15 @@ async function runAutoCodexProjectWorker(
           );
         }
 
-        const { paths, context } = await prepareAutoCodexContext(
+        const { paths, context } = await prepareAutoOpenCodeContext(
           envelope,
           autoProject,
           jobId,
         );
 
         if (debugStatusEnabled) {
-          await enqueueAutoCodexStatus(
-            autoCodexRedis,
+          await enqueueAutoOpenCodeStatus(
+            autoOpenCodeRedis,
             autoProject,
             autoProject.progressTemplate,
             "executing",
@@ -2158,16 +2086,16 @@ async function runAutoCodexProjectWorker(
 
         const statusPromises = new Set<Promise<void>>();
         const noTimeoutMode = autoProject.timeoutMs === null;
-        const isCodexCommand = isCodexExecCommand(autoProject.command);
+        const isOpenCodeCommand = isOpenCodeRunCommand(autoProject.command);
         const heartbeatIntervalMs = noTimeoutMode
-          ? AUTO_CODEX_INFINITE_TIMEOUT_HEARTBEAT_MS
+          ? AUTO_OPENCODE_INFINITE_TIMEOUT_HEARTBEAT_MS
           : autoProject.heartbeatMs;
         const heartbeatEnabled = debugStatusEnabled && heartbeatIntervalMs > 0 &&
-          (noTimeoutMode || (!isCodexCommand && autoProject.progressUpdates));
+          (noTimeoutMode || (!isOpenCodeCommand && autoProject.progressUpdates));
 
         const queueStatus = (phase: string, source: "heartbeat" | "stream"): void => {
-          const pending = enqueueAutoCodexStatus(
-            autoCodexRedis,
+          const pending = enqueueAutoOpenCodeStatus(
+            autoOpenCodeRedis,
             autoProject,
             autoProject.progressTemplate,
             phase,
@@ -2177,7 +2105,7 @@ async function runAutoCodexProjectWorker(
             .then(() => undefined)
             .catch((error: unknown) => {
               const detail = error instanceof Error ? error.message : String(error);
-              logEvent("warn", "auto_codex.status.enqueue_failed", {
+              logEvent("warn", "auto_opencode.status.enqueue_failed", {
                 projectKey: autoProject.projectKey,
                 queue: userQueue,
                 sender,
@@ -2199,14 +2127,14 @@ async function runAutoCodexProjectWorker(
           for (
             let start = 0;
             start < normalized.length;
-            start += AUTO_CODEX_MAX_MESSAGE_CHARS
+            start += AUTO_OPENCODE_MAX_MESSAGE_CHARS
           ) {
             const chunk = normalized.slice(
               start,
-              start + AUTO_CODEX_MAX_MESSAGE_CHARS,
+              start + AUTO_OPENCODE_MAX_MESSAGE_CHARS,
             );
-            const pending = enqueueAutoCodexMessage(
-              autoCodexRedis,
+            const pending = enqueueAutoOpenCodeMessage(
+              autoOpenCodeRedis,
               autoProject,
               chunk,
               "markdown",
@@ -2214,7 +2142,7 @@ async function runAutoCodexProjectWorker(
               .then(() => undefined)
               .catch((error: unknown) => {
                 const detail = error instanceof Error ? error.message : String(error);
-                logEvent("warn", "auto_codex.stream.enqueue_failed", {
+                logEvent("warn", "auto_opencode.stream.enqueue_failed", {
                   projectKey: autoProject.projectKey,
                   queue: userQueue,
                   sender,
@@ -2245,7 +2173,26 @@ async function runAutoCodexProjectWorker(
         let lastStreamSentPhase: string | null = null;
         let lastStreamSentAt = 0;
         let lastStreamSentChars = 0;
-        let thinkingTitlesSentCount = 0;
+        const thinkingTitlesSent = new Set<string>();
+
+        const queueThinkingTitle = (title: string): void => {
+          const normalized = title.replace(/\s+/g, " ").trim();
+          if (!normalized) {
+            return;
+          }
+
+          const clipped = truncateInline(normalized, 180);
+          if (thinkingTitlesSent.has(clipped)) {
+            return;
+          }
+
+          thinkingTitlesSent.add(clipped);
+          queueStreamPreview(clipped);
+          const now = Date.now();
+          lastStreamSentPhase = latestStreamPhase;
+          lastStreamSentAt = now;
+          lastStreamSentChars = streamText.length;
+        };
 
         const maybeSendStreamUpdate = (force: boolean): void => {
           if (!streamPreviewEnabled) {
@@ -2253,31 +2200,26 @@ async function runAutoCodexProjectWorker(
           }
 
           if (autoProject.verbosity === "thinking") {
-            const titles = extractThinkingTitles(streamText);
-            const unsentTitles = titles.slice(thinkingTitlesSentCount);
-            if (unsentTitles.length === 0) {
-              return;
+            if (force && thinkingTitlesSent.size === 0 && /\S/.test(streamText)) {
+              const fallbackTitle = streamText
+                .replace(/\r\n/g, "\n")
+                .split(/\n{2,}/)[0]
+                ?.split("\n")[0]
+                ?.trim();
+              if (fallbackTitle) {
+                queueThinkingTitle(fallbackTitle);
+              }
             }
-
-            for (const title of unsentTitles) {
-              queueStreamPreview(title);
-            }
-
-            const now = Date.now();
-            thinkingTitlesSentCount = titles.length;
-            lastStreamSentPhase = latestStreamPhase;
-            lastStreamSentAt = now;
-            lastStreamSentChars = streamText.length;
             return;
           }
 
           const now = Date.now();
           const grownChars = streamText.length - lastStreamSentChars;
           if (!force) {
-            if (grownChars < AUTO_CODEX_STREAM_UPDATE_MIN_CHARS) {
+            if (grownChars < AUTO_OPENCODE_STREAM_UPDATE_MIN_CHARS) {
               return;
             }
-            if (now - lastStreamSentAt < AUTO_CODEX_STREAM_UPDATE_MIN_INTERVAL_MS) {
+            if (now - lastStreamSentAt < AUTO_OPENCODE_STREAM_UPDATE_MIN_INTERVAL_MS) {
               return;
             }
           } else if (grownChars <= 0) {
@@ -2295,7 +2237,7 @@ async function runAutoCodexProjectWorker(
             queueStreamPreview(delta);
           } else {
             const preview = streamText
-              .slice(Math.max(0, streamText.length - AUTO_CODEX_STREAM_PREVIEW_MAX_CHARS))
+              .slice(Math.max(0, streamText.length - AUTO_OPENCODE_STREAM_PREVIEW_MAX_CHARS))
               .replace(/\s+/g, " ")
               .trim();
 
@@ -2314,11 +2256,9 @@ async function runAutoCodexProjectWorker(
 
         let reply = "";
         try {
-          const outputLastMessagePath = join(paths.rootDir, `last-message-${jobId}.txt`);
-          reply = await runAutoCodexPrompt(
+          reply = await runAutoOpenCodePrompt(
             context,
             autoProject,
-            outputLastMessagePath,
             {
               onStreamPhase: (phase: string) => {
                 latestStreamPhase = phase;
@@ -2329,7 +2269,7 @@ async function runAutoCodexProjectWorker(
                 const now = Date.now();
                 if (
                   phase !== lastStreamSentPhase &&
-                  now - lastStreamSentAt >= AUTO_CODEX_STREAM_UPDATE_MIN_INTERVAL_MS
+                  now - lastStreamSentAt >= AUTO_OPENCODE_STREAM_UPDATE_MIN_INTERVAL_MS
                 ) {
                   queueStatus(`stream:${phase}`, "stream");
                   lastStreamSentPhase = phase;
@@ -2339,6 +2279,12 @@ async function runAutoCodexProjectWorker(
               onStreamText: (text: string) => {
                 streamText = appendStreamText(streamText, text);
                 maybeSendStreamUpdate(false);
+              },
+              onThinkingTitle: (title: string) => {
+                if (autoProject.verbosity !== "thinking") {
+                  return;
+                }
+                queueThinkingTitle(title);
               },
             },
           );
@@ -2352,22 +2298,22 @@ async function runAutoCodexProjectWorker(
           }
         }
 
-        const finalText = truncateText(reply, AUTO_CODEX_MAX_CONTEXT_CHARS);
+        const finalText = truncateText(reply, AUTO_OPENCODE_MAX_CONTEXT_CHARS);
         const suppressFinalOutput = autoProject.verbosity === "thinking-complete" &&
           streamPreviewEnabled &&
           /\S/.test(streamText);
         const outbound = suppressFinalOutput
           ? null
-          : await enqueueAutoCodexMessage(
-            autoCodexRedis,
+          : await enqueueAutoOpenCodeMessage(
+            autoOpenCodeRedis,
             autoProject,
             finalText,
             "markdown",
           );
 
         if (debugStatusEnabled) {
-          await enqueueAutoCodexStatus(
-            autoCodexRedis,
+          await enqueueAutoOpenCodeStatus(
+            autoOpenCodeRedis,
             autoProject,
             autoProject.progressTemplate,
             "finalizing",
@@ -2384,8 +2330,8 @@ async function runAutoCodexProjectWorker(
         );
 
         const durationMs = Date.now() - startedAt;
-        recordProcessingLatency("auto_codex_job", durationMs);
-        logEvent("info", "auto_codex.job.completed", {
+        recordProcessingLatency("auto_opencode_job", durationMs);
+        logEvent("info", "auto_opencode.job.completed", {
           projectKey: autoProject.projectKey,
           queue: poppedQueue,
           sender,
@@ -2399,19 +2345,19 @@ async function runAutoCodexProjectWorker(
         });
       } catch (error: unknown) {
         const detail =
-          error instanceof Error ? error.message : "auto-codex command failed";
+          error instanceof Error ? error.message : "auto-opencode command failed";
         const durationMs = Date.now() - startedAt;
-        recordFailure("auto_codex_job", autoProject.projectKey);
-        recordProcessingLatency("auto_codex_job", durationMs);
+        recordFailure("auto_opencode_job", autoProject.projectKey);
+        recordProcessingLatency("auto_opencode_job", durationMs);
 
-        const failureBody = `Codex job ${jobId} failed: ${detail}`;
-        const outbound = await enqueueAutoCodexMessage(
-          autoCodexRedis,
+        const failureBody = `OpenCode job ${jobId} failed: ${detail}`;
+        const outbound = await enqueueAutoOpenCodeMessage(
+          autoOpenCodeRedis,
           autoProject,
           failureBody,
           "plain",
         );
-        logEvent("error", "auto_codex.job.failed", {
+        logEvent("error", "auto_opencode.job.failed", {
           projectKey: autoProject.projectKey,
           queue: poppedQueue,
           sender,
@@ -2425,9 +2371,9 @@ async function runAutoCodexProjectWorker(
       }
     } catch (error: unknown) {
       const detail =
-        error instanceof Error ? error.message : "auto-codex worker loop failed";
-      recordFailure("auto_codex_worker_loop", autoProject.projectKey);
-      logEvent("error", "auto_codex.worker.loop_error", {
+        error instanceof Error ? error.message : "auto-opencode worker loop failed";
+      recordFailure("auto_opencode_worker_loop", autoProject.projectKey);
+      logEvent("error", "auto_opencode.worker.loop_error", {
         projectKey: autoProject.projectKey,
         queue: userQueue,
         error: detail,
@@ -2437,10 +2383,10 @@ async function runAutoCodexProjectWorker(
   }
 }
 
-async function runAutoCodexProjectSupervisor(
+async function runAutoOpenCodeProjectSupervisor(
   redisConfig: RedisConfig,
   userQueue: string,
-  autoProject: AutoCodexProject,
+  autoProject: AutoOpenCodeProject,
   workerClients: Set<Redis>,
 ): Promise<never> {
   let crashCount = 0;
@@ -2451,19 +2397,19 @@ async function runAutoCodexProjectSupervisor(
       workerRedis = await createRedisClient(redisConfig);
       workerClients.add(workerRedis);
       crashCount = 0;
-      await runAutoCodexProjectWorker(workerRedis, userQueue, autoProject);
+      await runAutoOpenCodeProjectWorker(workerRedis, userQueue, autoProject);
     } catch (error: unknown) {
       crashCount += 1;
       const detail =
-        error instanceof Error ? error.message : "auto-codex worker crashed";
+        error instanceof Error ? error.message : "auto-opencode worker crashed";
       recordWorkerRestart(autoProject.projectKey);
-      recordFailure("auto_codex_worker_crash", autoProject.projectKey);
+      recordFailure("auto_opencode_worker_crash", autoProject.projectKey);
       const backoffMs = Math.min(
-        AUTO_CODEX_WORKER_RESTART_MAX_DELAY_MS,
-        AUTO_CODEX_WORKER_RESTART_BASE_DELAY_MS *
+        AUTO_OPENCODE_WORKER_RESTART_MAX_DELAY_MS,
+        AUTO_OPENCODE_WORKER_RESTART_BASE_DELAY_MS *
           2 ** Math.min(crashCount - 1, 5),
       );
-      logEvent("error", "auto_codex.worker.crashed", {
+      logEvent("error", "auto_opencode.worker.crashed", {
         projectKey: autoProject.projectKey,
         queue: userQueue,
         error: detail,
@@ -2652,8 +2598,8 @@ async function commandDaemon(redisConfig: RedisConfig): Promise<void> {
   for (const [projectKey] of Object.entries(projects)) {
     queueToProject.set(queueKey(projectKey, "agent"), projectKey);
   }
-  const autoCodexQueueToProject = buildAutoCodexMap();
-  await validateAutoCodexProjects(autoCodexQueueToProject);
+  const autoOpenCodeQueueToProject = buildAutoOpenCodeMap();
+  await validateAutoOpenCodeProjects(autoOpenCodeQueueToProject);
 
   if (queueToProject.size === 0) {
     throw new Error("no projects configured in config.json");
@@ -2673,7 +2619,7 @@ async function commandDaemon(redisConfig: RedisConfig): Promise<void> {
   const outboundRedis = await createRedisClient(redisConfig);
   const inboundRedis = await createRedisClient(redisConfig);
   const apiRedis = await createRedisClient(redisConfig);
-  const autoCodexWorkerClients = new Set<Redis>();
+  const autoOpenCodeWorkerClients = new Set<Redis>();
 
   const port = resolvePort();
   const server = await startHttpFacade(apiRedis, authTokens, port);
@@ -2685,7 +2631,7 @@ async function commandDaemon(redisConfig: RedisConfig): Promise<void> {
     redisDb: redisConfig.db,
     outboundQueues: [...queueToProject.keys()],
     inboundRooms: [...roomToProject.keys()],
-    autoCodexProjects: [...autoCodexQueueToProject.values()].map((item) => ({
+    autoOpenCodeProjects: [...autoOpenCodeQueueToProject.values()].map((item) => ({
       projectKey: item.projectKey,
       command: item.command,
       cwd: item.cwd,
@@ -2713,17 +2659,17 @@ async function commandDaemon(redisConfig: RedisConfig): Promise<void> {
     },
   );
 
-  for (const [userQueue, autoProject] of autoCodexQueueToProject.entries()) {
-    runAutoCodexProjectSupervisor(
+  for (const [userQueue, autoProject] of autoOpenCodeQueueToProject.entries()) {
+    runAutoOpenCodeProjectSupervisor(
       redisConfig,
       userQueue,
       autoProject,
-      autoCodexWorkerClients,
+      autoOpenCodeWorkerClients,
     ).catch(
       (error: unknown) => {
         const detail = error instanceof Error ? error.message : String(error);
-        recordFailure("auto_codex_supervisor_fatal", autoProject.projectKey);
-        logEvent("error", "auto_codex.supervisor.fatal", {
+        recordFailure("auto_opencode_supervisor_fatal", autoProject.projectKey);
+        logEvent("error", "auto_opencode.supervisor.fatal", {
           projectKey: autoProject.projectKey,
           queue: userQueue,
           error: detail,
@@ -2738,10 +2684,10 @@ async function commandDaemon(redisConfig: RedisConfig): Promise<void> {
     outboundRedis.close();
     inboundRedis.close();
     apiRedis.close();
-    for (const workerRedis of autoCodexWorkerClients.values()) {
+    for (const workerRedis of autoOpenCodeWorkerClients.values()) {
       workerRedis.close();
     }
-    autoCodexWorkerClients.clear();
+    autoOpenCodeWorkerClients.clear();
     process.exit(0);
   };
 

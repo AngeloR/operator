@@ -10,6 +10,6 @@
     "typescript": "^5"
   },
   "dependencies": {
-    "marked": "^17.0.2"
+    "marked": "^17.0.3"
   }
 }

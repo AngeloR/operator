@@ -12,19 +12,19 @@
     "matrix-router": {
       "roomId": "!yourOtherRoomId:your-server",
       "prefix": "MR",
-      "autoCodex": true,
-      "autoCodexAgent": "codex",
-      "autoCodexCommand": ["codex", "exec", "--skip-git-repo-check"],
-      "autoCodexTimeoutSeconds": 300,
-      "autoCodexHeartbeatSeconds": 45,
-      "autoCodexVerbosity": "output",
-      "autoCodexSenderAllowlist": ["@admin:your-server"],
-      "autoCodexProgressUpdates": true,
-      "autoCodexStateDir": ".matrix-agent-state",
-      "autoCodexCwd": "/abs/path/to/project",
-      "autoCodexAckTemplate": "Received. Starting Codex job {{job_id}}.",
-      "autoCodexProgressTemplate": "Codex {{phase}} (job {{job_id}}).",
-      "autoCodexContextTailLines": 60
+      "autoOpenCode": true,
+      "autoOpenCodeAgent": "opencode",
+      "autoOpenCodeCommand": ["opencode", "run"],
+      "autoOpenCodeTimeoutSeconds": 300,
+      "autoOpenCodeHeartbeatSeconds": 45,
+      "autoOpenCodeVerbosity": "output",
+      "autoOpenCodeSenderAllowlist": ["@admin:your-server"],
+      "autoOpenCodeProgressUpdates": true,
+      "autoOpenCodeStateDir": ".matrix-agent-state",
+      "autoOpenCodeCwd": "/abs/path/to/project",
+      "autoOpenCodeAckTemplate": "Received. Starting OpenCode job {{job_id}}.",
+      "autoOpenCodeProgressTemplate": "OpenCode {{phase}} (job {{job_id}}).",
+      "autoOpenCodeContextTailLines": 60
     }
   }
 }
