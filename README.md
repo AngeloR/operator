@@ -30,6 +30,9 @@ cp config.example.json config.json
   "adminUserIds": ["@admin:your-server"],
   "agentApiToken": "replace-with-long-random-token",
   "redisUrl": "redis://127.0.0.1:6379/0",
+  "autoOpenCodeProjectModelOverrides": {
+    "matrix-router": "openai/gpt-5.3-codex"
+  },
   "projects": {
     "antares": {
       "roomId": "!yourRoomId:your-server"
@@ -40,7 +43,7 @@ cp config.example.json config.json
       "autoOpenCodeAgent": "opencode",
       "autoOpenCodeCommand": ["opencode", "run"],
       "autoOpenCodeCommandPrefix": "!oc",
-      "autoOpenCodeAllowedCliCommands": ["usage", "stats", "models", "help"],
+      "autoOpenCodeAllowedCliCommands": ["usage", "stats", "models", "model", "help"],
       "autoOpenCodeCommandTimeoutSeconds": 30,
       "autoOpenCodeTimeoutSeconds": 300,
       "autoOpenCodeHeartbeatSeconds": 45,
@@ -70,7 +73,8 @@ Notes:
 - `autoOpenCodeCommand` executes on the host with this process's permissions; treat it as privileged configuration.
 - `autoOpenCodeAgent` is an optional internal agent label used for context/state partitioning.
 - `autoOpenCodeCommand` must invoke `opencode run`; relay automatically enforces `--format json` and adds `--thinking` for `thinking` / `thinking-complete` verbosity modes.
-- In-room commands are available with `autoOpenCodeCommandPrefix` (default `!oc`) and run on an allowlist (`autoOpenCodeAllowedCliCommands`, default `usage/stats/models/help`).
+- In-room commands are available with `autoOpenCodeCommandPrefix` (default `!oc`) and run on an allowlist (`autoOpenCodeAllowedCliCommands`, default `usage/stats/models/model/help`).
+- `autoOpenCodeProjectModelOverrides` is an optional top-level map of project keys to model IDs. `!oc model` updates this map.
 - `autoOpenCodeCommandTimeoutSeconds` defaults to `30` for prefixed in-room commands.
 - `autoOpenCodeTimeoutSeconds` defaults to `300`; set `0` to disable timeout and force a 15-minute heartbeat while OpenCode is running.
 - `autoOpenCodeHeartbeatSeconds` defaults to `45`; heartbeat updates are sent in debug mode for long-running jobs. Set `0` to disable timed heartbeats.
@@ -85,6 +89,9 @@ In-room command examples (default prefix):
 - `!oc usage openai/gpt-5.3-codex --days 30`
 - `!oc stats --models --days 7`
 - `!oc models`
+- `!oc model`
+- `!oc model openai/gpt-5.3-codex`
+- `!oc model reset`
 
 ## Run
 

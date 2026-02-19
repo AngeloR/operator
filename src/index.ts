@@ -4,6 +4,7 @@ import { RedisClient } from "bun";
 import { spawn } from "node:child_process";
 import { appendFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   type MessageFormat,
   nonEmptyText,
@@ -56,6 +57,7 @@ type AppConfig = {
   accessToken: string;
   port?: number;
   projects: Record<string, ProjectConfig>;
+  autoOpenCodeProjectModelOverrides?: Record<string, string>;
   adminUserIds?: string[];
   agentApiToken?: string;
   agentApiTokens?: string[];
@@ -198,7 +200,7 @@ type AutoOpenCodeStreamHandlers = {
   onThinkingTitle?: (title: string) => void;
 };
 
-type AutoOpenCodeCliCommand = "usage" | "stats" | "models" | "help";
+type AutoOpenCodeCliCommand = "usage" | "stats" | "models" | "model" | "help";
 
 type ParsedAutoOpenCodeCliRequest = {
   command: AutoOpenCodeCliCommand;
@@ -207,10 +209,11 @@ type ParsedAutoOpenCodeCliRequest = {
 
 const cfg = config as AppConfig;
 const projects = cfg.projects ?? {};
+const CONFIG_JSON_PATH = fileURLToPath(new URL("../config.json", import.meta.url));
 const SYNC_TOKEN_KEY = "matrix-agent:sync:next-batch:v1";
 const DEFAULT_AUTO_OPENCODE_COMMAND = ["opencode", "run"];
 const DEFAULT_AUTO_OPENCODE_COMMAND_PREFIX = "!oc";
-const DEFAULT_AUTO_OPENCODE_ALLOWED_CLI_COMMANDS = ["usage", "stats", "models", "help"];
+const DEFAULT_AUTO_OPENCODE_ALLOWED_CLI_COMMANDS = ["usage", "stats", "models", "model", "help"];
 const DEFAULT_AUTO_OPENCODE_COMMAND_TIMEOUT_SECONDS = 30;
 const DEFAULT_AUTO_OPENCODE_TIMEOUT_SECONDS = 300;
 const DEFAULT_AUTO_OPENCODE_HEARTBEAT_SECONDS = 45;
@@ -235,6 +238,7 @@ const AUTO_OPENCODE_CLI_ALLOWED_COMMANDS = new Set<AutoOpenCodeCliCommand>([
   "usage",
   "stats",
   "models",
+  "model",
   "help",
 ]);
 
@@ -288,6 +292,80 @@ function parseAgentApiTokens(appConfig: AppConfig): Set<string> {
   }
 
   return new Set(tokens);
+}
+
+function parseAutoOpenCodeProjectModelOverrides(
+  value: unknown,
+): Record<string, string> {
+  if (value === undefined) {
+    return {};
+  }
+
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("autoOpenCodeProjectModelOverrides must be an object mapping project keys to model IDs");
+  }
+
+  const parsed: Record<string, string> = {};
+  for (const [projectKey, rawModel] of Object.entries(value as Record<string, unknown>)) {
+    const model = nonEmptyText(rawModel);
+    if (!model) {
+      throw new Error(
+        `autoOpenCodeProjectModelOverrides[${projectKey}] must be a non-empty string`,
+      );
+    }
+    parsed[projectKey] = model;
+  }
+
+  return parsed;
+}
+
+let autoOpenCodeProjectModelOverrides = parseAutoOpenCodeProjectModelOverrides(
+  cfg.autoOpenCodeProjectModelOverrides,
+);
+
+function getAutoOpenCodeProjectModelOverride(projectKey: string): string | undefined {
+  return nonEmptyText(autoOpenCodeProjectModelOverrides[projectKey]) ?? undefined;
+}
+
+async function persistAutoOpenCodeProjectModelOverride(
+  projectKey: string,
+  model: string | null,
+): Promise<void> {
+  const rawConfig = await readFile(CONFIG_JSON_PATH, "utf8");
+
+  let parsedConfig: unknown;
+  try {
+    parsedConfig = JSON.parse(rawConfig) as unknown;
+  } catch {
+    throw new Error("config.json is not valid JSON");
+  }
+
+  if (typeof parsedConfig !== "object" || parsedConfig === null || Array.isArray(parsedConfig)) {
+    throw new Error("config.json root must be a JSON object");
+  }
+
+  const configObject = parsedConfig as Record<string, unknown>;
+  const overrides = parseAutoOpenCodeProjectModelOverrides(
+    configObject.autoOpenCodeProjectModelOverrides,
+  );
+
+  if (model === null) {
+    delete overrides[projectKey];
+  } else {
+    overrides[projectKey] = model;
+  }
+
+  if (Object.keys(overrides).length === 0) {
+    delete configObject.autoOpenCodeProjectModelOverrides;
+    delete cfg.autoOpenCodeProjectModelOverrides;
+    autoOpenCodeProjectModelOverrides = {};
+  } else {
+    configObject.autoOpenCodeProjectModelOverrides = overrides;
+    cfg.autoOpenCodeProjectModelOverrides = overrides;
+    autoOpenCodeProjectModelOverrides = overrides;
+  }
+
+  await writeFile(CONFIG_JSON_PATH, `${JSON.stringify(configObject, null, 2)}\n`, "utf8");
 }
 
 function toPlainHtml(text: string): string {
@@ -441,10 +519,11 @@ function parseAutoOpenCodeAllowedCliCommands(
       command !== "usage" &&
       command !== "stats" &&
       command !== "models" &&
+      command !== "model" &&
       command !== "help"
     ) {
       throw new Error(
-        "autoOpenCodeAllowedCliCommands entries must be one of: usage, stats, models, help",
+        "autoOpenCodeAllowedCliCommands entries must be one of: usage, stats, models, model, help",
       );
     }
   }
@@ -619,6 +698,7 @@ function isOpenCodeRunCommand(command: string[]): boolean {
 function prepareAutoOpenCodeCommand(
   command: string[],
   verbosity: AutoOpenCodeVerbosity,
+  modelOverride?: string,
 ): PreparedAutoOpenCodeCommand {
   if (!isOpenCodeRunCommand(command)) {
     throw new Error("autoOpenCodeCommand must invoke `opencode run`");
@@ -635,6 +715,10 @@ function prepareAutoOpenCodeCommand(
   const needsThinking = verbosity === "thinking" || verbosity === "thinking-complete";
   if (needsThinking && !commandHasOption(prepared.command, "thinking")) {
     prepared.command.push("--thinking");
+  }
+
+  if (modelOverride && !commandHasOption(prepared.command, "model", "m")) {
+    prepared.command.push("--model", modelOverride);
   }
 
   return prepared;
@@ -1569,6 +1653,32 @@ function parseModelsCommandArgs(args: string[]): string[] {
   return command;
 }
 
+type ParsedModelCommandAction =
+  | { action: "show" }
+  | { action: "reset" }
+  | { action: "set"; model: string };
+
+function parseModelCommandArgs(args: string[]): ParsedModelCommandAction {
+  if (args.length === 0) {
+    return { action: "show" };
+  }
+
+  if (args.length > 1) {
+    throw new Error("model command accepts exactly one argument: <model-id> or reset");
+  }
+
+  const value = nonEmptyText(args[0]);
+  if (!value) {
+    throw new Error("model command requires a model value or `reset`");
+  }
+
+  if (value.toLowerCase() === "reset") {
+    return { action: "reset" };
+  }
+
+  return { action: "set", model: value };
+}
+
 function extractModelUsageBlock(output: string, model: string): string | null {
   const lines = output.replace(/\r\n/g, "\n").split("\n");
   const needle = model.toLowerCase();
@@ -1606,6 +1716,7 @@ function autoOpenCodeCliHelp(prefix: string): string {
     `- ${prefix} usage <model> [--days N] [--project KEY]`,
     `- ${prefix} stats [--days N] [--models [N]] [--project KEY]`,
     `- ${prefix} models [provider] [--verbose] [--refresh]`,
+    `- ${prefix} model [<model-id>|reset]`,
     `- ${prefix} help`,
   ].join("\n");
 }
@@ -1622,6 +1733,50 @@ async function executeAutoOpenCodeCliCommand(
     throw new Error(
       `command ${request.command} is disabled for this project (allowed: ${[...autoProject.allowedCliCommands].join(", ")})`,
     );
+  }
+
+  if (request.command === "model") {
+    const action = parseModelCommandArgs(request.args);
+    const current = getAutoOpenCodeProjectModelOverride(autoProject.projectKey);
+
+    if (action.action === "show") {
+      return current
+        ? [
+          `Model override for project \`${autoProject.projectKey}\` is \`${current}\`.`,
+          "",
+          `Use \`${autoProject.commandPrefix} model reset\` to fall back to OpenCode defaults.`,
+        ].join("\n")
+        : [
+          `No project model override is set for \`${autoProject.projectKey}\`.`,
+          "",
+          "OpenCode will use its configured default model.",
+          `Set one with \`${autoProject.commandPrefix} model <model-id>\`.`,
+        ].join("\n");
+    }
+
+    if (action.action === "reset") {
+      if (!current) {
+        return [
+          `No project model override is set for \`${autoProject.projectKey}\`.`,
+          "",
+          "Nothing to reset.",
+        ].join("\n");
+      }
+
+      await persistAutoOpenCodeProjectModelOverride(autoProject.projectKey, null);
+      return [
+        `Cleared project model override for \`${autoProject.projectKey}\`.`,
+        "",
+        "OpenCode will now use its configured default model.",
+      ].join("\n");
+    }
+
+    await persistAutoOpenCodeProjectModelOverride(autoProject.projectKey, action.model);
+    return [
+      `Set model override for \`${autoProject.projectKey}\` to \`${action.model}\`.`,
+      "",
+      "New OpenCode runs in this project will use that model.",
+    ].join("\n");
   }
 
   let command: string[];
@@ -1821,6 +1976,7 @@ async function runAutoOpenCodePrompt(
   const prepared = prepareAutoOpenCodeCommand(
     autoProject.command,
     autoProject.verbosity,
+    getAutoOpenCodeProjectModelOverride(autoProject.projectKey),
   );
 
   let stdoutLineBuffer = "";
@@ -2269,7 +2425,7 @@ Project-level autoOpenCode (optional):
   autoOpenCodeAgent: "opencode"                              # optional internal agent label (state/context)
   autoOpenCodeCommand: ["opencode","run"]                    # relay enforces JSON stream mode and requires opencode run
   autoOpenCodeCommandPrefix: "!oc"                            # in-room command prefix for opencode CLI shortcuts
-  autoOpenCodeAllowedCliCommands: ["usage","stats","models","help"] # command allowlist
+  autoOpenCodeAllowedCliCommands: ["usage","stats","models","model","help"] # command allowlist
   autoOpenCodeCommandTimeoutSeconds: 30                        # timeout for prefixed in-room opencode commands
   autoOpenCodeTimeoutSeconds: 300                         # timeout per message (0 disables timeout + forces 15m heartbeat)
   autoOpenCodeHeartbeatSeconds: 45                        # periodic heartbeat for debug mode (0 disables)

@@ -4,6 +4,9 @@
   "accessToken": "replace-me-matrix-access-token",
   "adminUserIds": ["@admin:your-server"],
   "agentApiToken": "replace-me-agent-token",
+  "autoOpenCodeProjectModelOverrides": {
+    "matrix-router": "openai/gpt-5.3-codex"
+  },
   "projects": {
     "your-project": {
       "roomId": "!yourRoomId:your-server",
@@ -16,7 +19,7 @@
       "autoOpenCodeAgent": "opencode",
       "autoOpenCodeCommand": ["opencode", "run"],
       "autoOpenCodeCommandPrefix": "!oc",
-      "autoOpenCodeAllowedCliCommands": ["usage", "stats", "models", "help"],
+      "autoOpenCodeAllowedCliCommands": ["usage", "stats", "models", "model", "help"],
       "autoOpenCodeCommandTimeoutSeconds": 30,
       "autoOpenCodeTimeoutSeconds": 300,
       "autoOpenCodeHeartbeatSeconds": 45,
