@@ -34,7 +34,6 @@ import {
 type ProjectConfig = {
   roomId: string;
   prefix?: string;
-  autoOpenCode?: boolean;
   autoOpenCodeAgent?: string;
   autoOpenCodeCommand?: string[];
   autoOpenCodeCommandPrefix?: string;
@@ -730,13 +729,9 @@ function buildAutoOpenCodeMap(): Map<string, AutoOpenCodeProject> {
   for (const [projectKey, project] of Object.entries(projects)) {
     assertNoLegacyAutoCodexConfig(projectKey, project);
 
-    if (project.autoOpenCode !== true) {
-      continue;
-    }
-
     const roomId = nonEmptyText(project.roomId);
     if (!roomId) {
-      throw new Error(`project "${projectKey}" has autoOpenCode enabled but no roomId`);
+      throw new Error(`project "${projectKey}" has no roomId`);
     }
 
     const command = parseAutoOpenCodeCommand(project.autoOpenCodeCommand) ??

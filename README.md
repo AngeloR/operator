@@ -65,7 +65,6 @@ cp config.example.json config.json
   "projects": {
     "my-project": {
       "roomId": "!abc123:matrix.org",
-      "autoOpenCode": true,
       "autoOpenCodeCwd": "/path/to/your/codebase",
       "autoOpenCodeSenderAllowlist": ["@you:matrix.org"]
     }
@@ -81,7 +80,7 @@ bun run src/index.ts
 
 ## In-Room Commands
 
-When `autoOpenCode` is enabled, you can use these commands directly in Matrix rooms:
+You can use these commands directly in Matrix rooms:
 
 | Command                           | Description                                  |
 | --------------------------------- | -------------------------------------------- |
@@ -153,12 +152,11 @@ curl http://localhost:8888/v1/metrics
 | ----------------------------- | -------- | --------------------------------------------------------------- |
 | `roomId`                      | Yes      | Matrix room ID                                                  |
 | `prefix`                      | No       | Legacy prefix for message routing                               |
-| `autoOpenCode`                | No       | Enable automatic OpenCode responses                             |
 | `autoOpenCodeAgent`           | No       | Agent label (default: `opencode`)                               |
 | `autoOpenCodeCommand`         | No       | Command to run (default: `["opencode", "run"]`)                 |
 | `autoOpenCodeCommandPrefix`   | No       | In-room command prefix (default: `!oc`)                         |
-| `autoOpenCodeCwd`             | No       | Working directory for OpenCode                                  |
-| `autoOpenCodeSenderAllowlist` | Yes\*    | Allowed senders (\*required if autoOpenCode enabled)            |
+| `autoOpenCodeCwd`             | Yes      | Working directory for OpenCode                                  |
+| `autoOpenCodeSenderAllowlist` | Yes      | Allowed senders                                                 |
 | `autoOpenCodeTimeoutSeconds`  | No       | Timeout for OpenCode runs (default: 300, 0=disable)             |
 | `autoOpenCodeVerbosity`       | No       | Output mode: `output`, `debug`, `thinking`, `thinking-complete` |
 

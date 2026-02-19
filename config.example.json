@@ -15,7 +15,6 @@
     "matrix-router": {
       "roomId": "!yourOtherRoomId:your-server",
       "prefix": "MR",
-      "autoOpenCode": true,
       "autoOpenCodeAgent": "opencode",
       "autoOpenCodeCommand": ["opencode", "run"],
       "autoOpenCodeCommandPrefix": "!oc",
