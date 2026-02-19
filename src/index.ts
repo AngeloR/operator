@@ -34,21 +34,21 @@ import {
 type ProjectConfig = {
   roomId: string;
   prefix?: string;
-  autoOpenCodeAgent?: string;
-  autoOpenCodeCommand?: string[];
-  autoOpenCodeCommandPrefix?: string;
-  autoOpenCodeAllowedCliCommands?: string[];
-  autoOpenCodeCommandTimeoutSeconds?: number;
-  autoOpenCodeTimeoutSeconds?: number;
-  autoOpenCodeHeartbeatSeconds?: number;
-  autoOpenCodeVerbosity?: string;
-  autoOpenCodeProgressUpdates?: boolean;
-  autoOpenCodeStateDir?: string;
-  autoOpenCodeCwd?: string;
-  autoOpenCodeSenderAllowlist?: string[];
-  autoOpenCodeAckTemplate?: string;
-  autoOpenCodeProgressTemplate?: string;
-  autoOpenCodeContextTailLines?: number;
+  agent?: string;
+  command?: string[];
+  commandPrefix?: string;
+  allowedCliCommands?: string[];
+  commandTimeoutSeconds?: number;
+  timeoutSeconds?: number;
+  heartbeatSeconds?: number;
+  verbosity?: string;
+  progressUpdates?: boolean;
+  stateDir?: string;
+  projectWorkingDirectory?: string;
+  senderAllowlist?: string[];
+  ackTemplate?: string;
+  progressTemplate?: string;
+  contextTailLines?: number;
 };
 
 type AppConfig = {
@@ -56,7 +56,7 @@ type AppConfig = {
   accessToken: string;
   port?: number;
   projects: Record<string, ProjectConfig>;
-  autoOpenCodeProjectModelOverrides?: Record<string, string>;
+  projectModelOverrides?: Record<string, string>;
   adminUserIds?: string[];
   agentApiToken?: string;
   agentApiTokens?: string[];
@@ -293,7 +293,7 @@ function parseAgentApiTokens(appConfig: AppConfig): Set<string> {
   return new Set(tokens);
 }
 
-function parseAutoOpenCodeProjectModelOverrides(
+function parseProjectModelOverrides(
   value: unknown,
 ): Record<string, string> {
   if (value === undefined) {
@@ -301,7 +301,7 @@ function parseAutoOpenCodeProjectModelOverrides(
   }
 
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error("autoOpenCodeProjectModelOverrides must be an object mapping project keys to model IDs");
+    throw new Error("projectModelOverrides must be an object mapping project keys to model IDs");
   }
 
   const parsed: Record<string, string> = {};
@@ -309,7 +309,7 @@ function parseAutoOpenCodeProjectModelOverrides(
     const model = nonEmptyText(rawModel);
     if (!model) {
       throw new Error(
-        `autoOpenCodeProjectModelOverrides[${projectKey}] must be a non-empty string`,
+        `projectModelOverrides[${projectKey}] must be a non-empty string`,
       );
     }
     parsed[projectKey] = model;
@@ -318,15 +318,15 @@ function parseAutoOpenCodeProjectModelOverrides(
   return parsed;
 }
 
-let autoOpenCodeProjectModelOverrides = parseAutoOpenCodeProjectModelOverrides(
-  cfg.autoOpenCodeProjectModelOverrides,
+let projectModelOverrides = parseProjectModelOverrides(
+  cfg.projectModelOverrides,
 );
 
-function getAutoOpenCodeProjectModelOverride(projectKey: string): string | undefined {
-  return nonEmptyText(autoOpenCodeProjectModelOverrides[projectKey]) ?? undefined;
+function getProjectModelOverride(projectKey: string): string | undefined {
+  return nonEmptyText(projectModelOverrides[projectKey]) ?? undefined;
 }
 
-async function persistAutoOpenCodeProjectModelOverride(
+async function persistProjectModelOverride(
   projectKey: string,
   model: string | null,
 ): Promise<void> {
@@ -344,8 +344,8 @@ async function persistAutoOpenCodeProjectModelOverride(
   }
 
   const configObject = parsedConfig as Record<string, unknown>;
-  const overrides = parseAutoOpenCodeProjectModelOverrides(
-    configObject.autoOpenCodeProjectModelOverrides,
+  const overrides = parseProjectModelOverrides(
+    configObject.projectModelOverrides,
   );
 
   if (model === null) {
@@ -355,13 +355,13 @@ async function persistAutoOpenCodeProjectModelOverride(
   }
 
   if (Object.keys(overrides).length === 0) {
-    delete configObject.autoOpenCodeProjectModelOverrides;
-    delete cfg.autoOpenCodeProjectModelOverrides;
-    autoOpenCodeProjectModelOverrides = {};
+    delete configObject.projectModelOverrides;
+    delete cfg.projectModelOverrides;
+    projectModelOverrides = {};
   } else {
-    configObject.autoOpenCodeProjectModelOverrides = overrides;
-    cfg.autoOpenCodeProjectModelOverrides = overrides;
-    autoOpenCodeProjectModelOverrides = overrides;
+    configObject.projectModelOverrides = overrides;
+    cfg.projectModelOverrides = overrides;
+    projectModelOverrides = overrides;
   }
 
   await writeFile(CONFIG_JSON_PATH, `${JSON.stringify(configObject, null, 2)}\n`, "utf8");
@@ -399,7 +399,7 @@ function queueKey(projectKey: string, direction: QueueDirection): string {
   return `${projectKey}:${direction}`;
 }
 
-function parseAutoOpenCodeBoolean(
+function parseBoolean(
   value: unknown,
   fallback: boolean,
   fieldName: string,
@@ -415,7 +415,7 @@ function parseAutoOpenCodeBoolean(
   return value;
 }
 
-function parseAutoOpenCodeVerbosity(
+function parseVerbosity(
   value: unknown,
   fallback: AutoOpenCodeVerbosity,
 ): AutoOpenCodeVerbosity {
@@ -425,7 +425,7 @@ function parseAutoOpenCodeVerbosity(
 
   const parsed = nonEmptyText(value)?.toLowerCase();
   if (!parsed) {
-    throw new Error("autoOpenCodeVerbosity must be a non-empty string");
+    throw new Error("verbosity must be a non-empty string");
   }
 
   if (
@@ -435,14 +435,14 @@ function parseAutoOpenCodeVerbosity(
     parsed !== "output"
   ) {
     throw new Error(
-      "autoOpenCodeVerbosity must be one of: debug, thinking, thinking-complete, output",
+      "verbosity must be one of: debug, thinking, thinking-complete, output",
     );
   }
 
   return parsed;
 }
 
-function parseAutoOpenCodeString(
+function parseString(
   value: unknown,
   fallback: string,
   fieldName: string,
@@ -459,13 +459,13 @@ function parseAutoOpenCodeString(
   return parsed;
 }
 
-function parseAutoOpenCodeCommand(value: unknown): string[] | null {
+function parseCommand(value: unknown): string[] | null {
   if (value === undefined) {
     return null;
   }
 
   if (!Array.isArray(value)) {
-    throw new Error("autoOpenCodeCommand must be an array of strings");
+    throw new Error("command must be an array of strings");
   }
 
   const command = value
@@ -473,26 +473,26 @@ function parseAutoOpenCodeCommand(value: unknown): string[] | null {
     .filter((item) => item.length > 0);
 
   if (command.length === 0) {
-    throw new Error("autoOpenCodeCommand must include at least one token");
+    throw new Error("command must include at least one token");
   }
 
   return command;
 }
 
-function parseAutoOpenCodeCommandPrefix(value: unknown): string {
+function parseCommandPrefix(value: unknown): string {
   if (value === undefined) {
     return DEFAULT_AUTO_OPENCODE_COMMAND_PREFIX;
   }
 
   const parsed = nonEmptyText(value);
   if (!parsed) {
-    throw new Error("autoOpenCodeCommandPrefix must be a non-empty string");
+    throw new Error("commandPrefix must be a non-empty string");
   }
 
   return parsed;
 }
 
-function parseAutoOpenCodeAllowedCliCommands(
+function parseAllowedCliCommands(
   value: unknown,
 ): Set<AutoOpenCodeCliCommand> {
   if (value === undefined) {
@@ -502,7 +502,7 @@ function parseAutoOpenCodeAllowedCliCommands(
   }
 
   if (!Array.isArray(value)) {
-    throw new Error("autoOpenCodeAllowedCliCommands must be an array of strings");
+    throw new Error("allowedCliCommands must be an array of strings");
   }
 
   const commands = value
@@ -510,7 +510,7 @@ function parseAutoOpenCodeAllowedCliCommands(
     .filter((item) => item.length > 0);
 
   if (commands.length === 0) {
-    throw new Error("autoOpenCodeAllowedCliCommands must include at least one command");
+    throw new Error("allowedCliCommands must include at least one command");
   }
 
   for (const command of commands) {
@@ -522,7 +522,7 @@ function parseAutoOpenCodeAllowedCliCommands(
       command !== "help"
     ) {
       throw new Error(
-        "autoOpenCodeAllowedCliCommands entries must be one of: usage, stats, models, model, help",
+        "allowedCliCommands entries must be one of: usage, stats, models, model, help",
       );
     }
   }
@@ -530,33 +530,33 @@ function parseAutoOpenCodeAllowedCliCommands(
   return new Set(commands as AutoOpenCodeCliCommand[]);
 }
 
-function parseAutoOpenCodeCommandTimeoutSeconds(value: unknown): number {
+function parseCommandTimeoutSeconds(value: unknown): number {
   if (value === undefined) {
     return DEFAULT_AUTO_OPENCODE_COMMAND_TIMEOUT_SECONDS;
   }
 
   const n = Number(value);
   if (!Number.isInteger(n) || n < 1 || n > 300) {
-    throw new Error("autoOpenCodeCommandTimeoutSeconds must be an integer between 1 and 300");
+    throw new Error("commandTimeoutSeconds must be an integer between 1 and 300");
   }
 
   return n;
 }
 
-function parseAutoOpenCodeCwd(value: unknown): string {
+function parseProjectWorkingDirectory(value: unknown): string {
   if (value === undefined) {
     return process.cwd();
   }
 
   const parsed = nonEmptyText(value);
   if (!parsed) {
-    throw new Error("autoOpenCodeCwd must be a non-empty string");
+    throw new Error("projectWorkingDirectory must be a non-empty string");
   }
 
   return resolve(parsed);
 }
 
-function parseAutoOpenCodeTimeoutSeconds(value: unknown): number {
+function parseTimeoutSeconds(value: unknown): number {
   if (value === undefined) {
     return DEFAULT_AUTO_OPENCODE_TIMEOUT_SECONDS;
   }
@@ -564,42 +564,42 @@ function parseAutoOpenCodeTimeoutSeconds(value: unknown): number {
   const n = Number(value);
   if (!Number.isInteger(n) || n < 0 || n > 3600) {
     throw new Error(
-      "autoOpenCodeTimeoutSeconds must be an integer between 0 and 3600 (0 disables timeout)",
+      "timeoutSeconds must be an integer between 0 and 3600 (0 disables timeout)",
     );
   }
 
   return n;
 }
 
-function parseAutoOpenCodeHeartbeatSeconds(value: unknown): number {
+function parseHeartbeatSeconds(value: unknown): number {
   if (value === undefined) {
     return DEFAULT_AUTO_OPENCODE_HEARTBEAT_SECONDS;
   }
 
   const n = Number(value);
   if (!Number.isInteger(n) || n < 0 || n > 3600) {
-    throw new Error("autoOpenCodeHeartbeatSeconds must be an integer between 0 and 3600");
+    throw new Error("heartbeatSeconds must be an integer between 0 and 3600");
   }
 
   return n;
 }
 
-function parseAutoOpenCodeContextTailLines(value: unknown): number {
+function parseContextTailLines(value: unknown): number {
   if (value === undefined) {
     return DEFAULT_AUTO_OPENCODE_CONTEXT_TAIL_LINES;
   }
 
   const n = Number(value);
   if (!Number.isInteger(n) || n < 10 || n > 500) {
-    throw new Error("autoOpenCodeContextTailLines must be an integer between 10 and 500");
+    throw new Error("contextTailLines must be an integer between 10 and 500");
   }
 
   return n;
 }
 
-function parseAutoOpenCodeSenderAllowlist(value: unknown): Set<string> {
+function parseSenderAllowlist(value: unknown): Set<string> {
   if (!Array.isArray(value)) {
-    throw new Error("autoOpenCodeSenderAllowlist must be an array of user IDs");
+    throw new Error("senderAllowlist must be an array of user IDs");
   }
 
   const ids = value
@@ -607,14 +607,14 @@ function parseAutoOpenCodeSenderAllowlist(value: unknown): Set<string> {
     .filter((item) => item.length > 0);
 
   if (ids.length === 0) {
-    throw new Error("autoOpenCodeSenderAllowlist must include at least one user ID");
+    throw new Error("senderAllowlist must include at least one user ID");
   }
 
   return new Set(ids);
 }
 
-function assertNoLegacyAutoCodexConfig(projectKey: string, project: ProjectConfig): void {
-  const legacyKeys = [
+function assertNoLegacyConfig(projectKey: string, project: ProjectConfig): void {
+  const legacyAutoCodexKeys = [
     "autoCodex",
     "autoCodexAgent",
     "autoCodexCommand",
@@ -631,15 +631,49 @@ function assertNoLegacyAutoCodexConfig(projectKey: string, project: ProjectConfi
     "autoCodexContextTailLines",
   ];
 
+  const legacyAutoOpenCodeKeys = [
+    "autoOpenCode",
+    "autoOpenCodeAgent",
+    "autoOpenCodeCommand",
+    "autoOpenCodeCommandPrefix",
+    "autoOpenCodeAllowedCliCommands",
+    "autoOpenCodeCommandTimeoutSeconds",
+    "autoOpenCodeTimeoutSeconds",
+    "autoOpenCodeHeartbeatSeconds",
+    "autoOpenCodeVerbosity",
+    "autoOpenCodeProgressUpdates",
+    "autoOpenCodeStateDir",
+    "autoOpenCodeCwd",
+    "autoOpenCodeSenderAllowlist",
+    "autoOpenCodeAckTemplate",
+    "autoOpenCodeProgressTemplate",
+    "autoOpenCodeContextTailLines",
+  ];
+
+  const legacyModelOverrides = "autoOpenCodeProjectModelOverrides";
+
   const rawProject = project as Record<string, unknown>;
-  const present = legacyKeys.filter((key) => rawProject[key] !== undefined);
-  if (present.length === 0) {
-    return;
+  const presentAutoCodex = legacyAutoCodexKeys.filter((key) => rawProject[key] !== undefined);
+  const presentAutoOpenCode = legacyAutoOpenCodeKeys.filter((key) => rawProject[key] !== undefined);
+
+  if (presentAutoCodex.length > 0) {
+    throw new Error(
+      `project "${projectKey}" uses removed config keys: ${presentAutoCodex.join(", ")}. See README.md for current config format.`,
+    );
   }
 
-  throw new Error(
-    `project "${projectKey}" uses removed config keys: ${present.join(", ")}. Rename them to autoOpenCode* equivalents.`,
-  );
+  if (presentAutoOpenCode.length > 0) {
+    throw new Error(
+      `project "${projectKey}" uses removed config keys: ${presentAutoOpenCode.join(", ")}. Rename to simpler names (e.g., autoOpenCodeCwd -> projectWorkingDirectory). See README.md for details.`,
+    );
+  }
+
+  const rawConfig = cfg as Record<string, unknown>;
+  if (rawConfig[legacyModelOverrides] !== undefined) {
+    throw new Error(
+      `config uses removed key "autoOpenCodeProjectModelOverrides". Rename to "projectModelOverrides".`,
+    );
+  }
 }
 
 function renderTemplate(
@@ -727,63 +761,63 @@ function buildAutoOpenCodeMap(): Map<string, AutoOpenCodeProject> {
   const map = new Map<string, AutoOpenCodeProject>();
 
   for (const [projectKey, project] of Object.entries(projects)) {
-    assertNoLegacyAutoCodexConfig(projectKey, project);
+    assertNoLegacyConfig(projectKey, project);
 
     const roomId = nonEmptyText(project.roomId);
     if (!roomId) {
       throw new Error(`project "${projectKey}" has no roomId`);
     }
 
-    const command = parseAutoOpenCodeCommand(project.autoOpenCodeCommand) ??
+    const command = parseCommand(project.command) ??
       DEFAULT_AUTO_OPENCODE_COMMAND;
-    const commandPrefix = parseAutoOpenCodeCommandPrefix(project.autoOpenCodeCommandPrefix);
-    const allowedCliCommands = parseAutoOpenCodeAllowedCliCommands(
-      project.autoOpenCodeAllowedCliCommands,
+    const commandPrefix = parseCommandPrefix(project.commandPrefix);
+    const allowedCliCommands = parseAllowedCliCommands(
+      project.allowedCliCommands,
     );
-    const commandTimeoutSeconds = parseAutoOpenCodeCommandTimeoutSeconds(
-      project.autoOpenCodeCommandTimeoutSeconds,
+    const commandTimeoutSeconds = parseCommandTimeoutSeconds(
+      project.commandTimeoutSeconds,
     );
     if (!isOpenCodeRunCommand(command)) {
       throw new Error(
-        `project "${projectKey}" has invalid autoOpenCodeCommand: expected opencode run`,
+        `project "${projectKey}" has invalid command: expected opencode run`,
       );
     }
-    const timeoutSeconds = parseAutoOpenCodeTimeoutSeconds(
-      project.autoOpenCodeTimeoutSeconds,
+    const timeoutSeconds = parseTimeoutSeconds(
+      project.timeoutSeconds,
     );
-    const heartbeatSeconds = parseAutoOpenCodeHeartbeatSeconds(
-      project.autoOpenCodeHeartbeatSeconds,
+    const heartbeatSeconds = parseHeartbeatSeconds(
+      project.heartbeatSeconds,
     );
-    const verbosity = parseAutoOpenCodeVerbosity(
-      project.autoOpenCodeVerbosity,
+    const verbosity = parseVerbosity(
+      project.verbosity,
       DEFAULT_AUTO_OPENCODE_VERBOSITY,
     );
-    const progressUpdates = parseAutoOpenCodeBoolean(
-      project.autoOpenCodeProgressUpdates,
+    const progressUpdates = parseBoolean(
+      project.progressUpdates,
       DEFAULT_AUTO_OPENCODE_PROGRESS_UPDATES,
-      "autoOpenCodeProgressUpdates",
+      "progressUpdates",
     );
-    const stateDir = parseAutoOpenCodeString(
-      project.autoOpenCodeStateDir,
+    const stateDir = parseString(
+      project.stateDir,
       DEFAULT_AUTO_OPENCODE_STATE_DIR,
-      "autoOpenCodeStateDir",
+      "stateDir",
     );
-    const cwd = parseAutoOpenCodeCwd(project.autoOpenCodeCwd);
-    const senderAllowlist = parseAutoOpenCodeSenderAllowlist(
-      project.autoOpenCodeSenderAllowlist,
+    const cwd = parseProjectWorkingDirectory(project.projectWorkingDirectory);
+    const senderAllowlist = parseSenderAllowlist(
+      project.senderAllowlist,
     );
-    const ackTemplate = parseAutoOpenCodeString(
-      project.autoOpenCodeAckTemplate,
+    const ackTemplate = parseString(
+      project.ackTemplate,
       DEFAULT_AUTO_OPENCODE_ACK_TEMPLATE,
-      "autoOpenCodeAckTemplate",
+      "ackTemplate",
     );
-    const progressTemplate = parseAutoOpenCodeString(
-      project.autoOpenCodeProgressTemplate,
+    const progressTemplate = parseString(
+      project.progressTemplate,
       DEFAULT_AUTO_OPENCODE_PROGRESS_TEMPLATE,
-      "autoOpenCodeProgressTemplate",
+      "progressTemplate",
     );
-    const contextTailLines = parseAutoOpenCodeContextTailLines(
-      project.autoOpenCodeContextTailLines,
+    const contextTailLines = parseContextTailLines(
+      project.contextTailLines,
     );
 
     const queue = queueKey(projectKey, "user");
@@ -791,7 +825,7 @@ function buildAutoOpenCodeMap(): Map<string, AutoOpenCodeProject> {
       projectKey,
       roomId,
       agent:
-        nonEmptyText(project.autoOpenCodeAgent) ??
+        nonEmptyText(project.agent) ??
         nonEmptyText(project.prefix) ??
         "opencode",
       command,
@@ -825,13 +859,13 @@ async function validateAutoOpenCodeProjects(
       entry = await stat(autoProject.cwd);
     } catch {
       throw new Error(
-        `project "${autoProject.projectKey}" has invalid autoOpenCodeCwd: directory not found (${autoProject.cwd})`,
+        `project "${autoProject.projectKey}" has invalid projectWorkingDirectory: directory not found (${autoProject.cwd})`,
       );
     }
 
     if (!entry.isDirectory()) {
       throw new Error(
-        `project "${autoProject.projectKey}" has invalid autoOpenCodeCwd: not a directory (${autoProject.cwd})`,
+        `project "${autoProject.projectKey}" has invalid projectWorkingDirectory: not a directory (${autoProject.cwd})`,
       );
     }
   }
@@ -1732,7 +1766,7 @@ async function executeAutoOpenCodeCliCommand(
 
   if (request.command === "model") {
     const action = parseModelCommandArgs(request.args);
-    const current = getAutoOpenCodeProjectModelOverride(autoProject.projectKey);
+    const current = getProjectModelOverride(autoProject.projectKey);
 
     if (action.action === "show") {
       return current
@@ -1758,7 +1792,7 @@ async function executeAutoOpenCodeCliCommand(
         ].join("\n");
       }
 
-      await persistAutoOpenCodeProjectModelOverride(autoProject.projectKey, null);
+      await persistProjectModelOverride(autoProject.projectKey, null);
       return [
         `Cleared project model override for \`${autoProject.projectKey}\`.`,
         "",
@@ -1766,7 +1800,7 @@ async function executeAutoOpenCodeCliCommand(
       ].join("\n");
     }
 
-    await persistAutoOpenCodeProjectModelOverride(autoProject.projectKey, action.model);
+    await persistProjectModelOverride(autoProject.projectKey, action.model);
     return [
       `Set model override for \`${autoProject.projectKey}\` to \`${action.model}\`.`,
       "",
@@ -1971,7 +2005,7 @@ async function runAutoOpenCodePrompt(
   const prepared = prepareAutoOpenCodeCommand(
     autoProject.command,
     autoProject.verbosity,
-    getAutoOpenCodeProjectModelOverride(autoProject.projectKey),
+    getProjectModelOverride(autoProject.projectKey),
   );
 
   let stdoutLineBuffer = "";
@@ -2415,23 +2449,25 @@ Auth for /v1/agent/*:
   Authorization: Bearer <token>
   token source: config.agentApiToken(s) or AGENT_API_TOKEN(S)
 
-Project-level autoOpenCode (optional):
-  autoOpenCode: true
-  autoOpenCodeAgent: "opencode"                              # optional internal agent label (state/context)
-  autoOpenCodeCommand: ["opencode","run"]                    # relay enforces JSON stream mode and requires opencode run
-  autoOpenCodeCommandPrefix: "!oc"                            # in-room command prefix for opencode CLI shortcuts
-  autoOpenCodeAllowedCliCommands: ["usage","stats","models","model","help"] # command allowlist
-  autoOpenCodeCommandTimeoutSeconds: 30                        # timeout for prefixed in-room opencode commands
-  autoOpenCodeTimeoutSeconds: 300                         # timeout per message (0 disables timeout + forces 15m heartbeat)
-  autoOpenCodeHeartbeatSeconds: 45                        # periodic heartbeat for debug mode (0 disables)
-  autoOpenCodeVerbosity: "output"                         # output|thinking|thinking-complete|debug
-  autoOpenCodeSenderAllowlist: ["@admin:your-server"]    # required
-  autoOpenCodeProgressUpdates: true                       # default true
-  autoOpenCodeStateDir: ".matrix-agent-state"            # default
-  autoOpenCodeCwd: "/abs/path/to/project"                # default: current relay-core cwd
-  autoOpenCodeAckTemplate: "Starting OpenCode {{job_id}}."   # used when autoOpenCodeVerbosity=debug
-  autoOpenCodeProgressTemplate: "OpenCode {{phase}} ({{job_id}})." # used for debug status updates
-  autoOpenCodeContextTailLines: 60                        # default
+Project-level config (all projects run the interactive agent):
+  agent: "opencode"                                    # optional internal agent label (state/context)
+  command: ["opencode","run"]                          # relay enforces JSON stream mode and requires opencode run
+  commandPrefix: "!oc"                                 # in-room command prefix for opencode CLI shortcuts
+  allowedCliCommands: ["usage","stats","models","model","help"] # command allowlist
+  commandTimeoutSeconds: 30                            # timeout for prefixed in-room opencode commands
+  timeoutSeconds: 300                                  # timeout per message (0 disables timeout + forces 15m heartbeat)
+  heartbeatSeconds: 45                                 # periodic heartbeat for debug mode (0 disables)
+  verbosity: "output"                                  # output|thinking|thinking-complete|debug
+  senderAllowlist: ["@admin:your-server"]              # required
+  progressUpdates: true                                # default true
+  stateDir: ".matrix-agent-state"                      # default
+  projectWorkingDirectory: "/abs/path/to/project"      # default: current relay-core cwd
+  ackTemplate: "Starting OpenCode {{job_id}}."         # used when verbosity=debug
+  progressTemplate: "OpenCode {{phase}} ({{job_id}})." # used for debug status updates
+  contextTailLines: 60                                 # default
+
+Top-level config:
+  projectModelOverrides: { "project-key": "model-id" } # per-project model overrides
 
 Environment:
   REDIS_URL (default: redis://127.0.0.1:6379/0)

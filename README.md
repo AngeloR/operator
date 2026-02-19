@@ -65,8 +65,8 @@ cp config.example.json config.json
   "projects": {
     "my-project": {
       "roomId": "!abc123:matrix.org",
-      "autoOpenCodeCwd": "/path/to/your/codebase",
-      "autoOpenCodeSenderAllowlist": ["@you:matrix.org"]
+      "projectWorkingDirectory": "/path/to/your/codebase",
+      "senderAllowlist": ["@you:matrix.org"]
     }
   }
 }
@@ -148,17 +148,17 @@ curl http://localhost:8888/v1/metrics
 
 ### Project Options
 
-| Key                           | Required | Description                                                     |
-| ----------------------------- | -------- | --------------------------------------------------------------- |
-| `roomId`                      | Yes      | Matrix room ID                                                  |
-| `prefix`                      | No       | Legacy prefix for message routing                               |
-| `autoOpenCodeAgent`           | No       | Agent label (default: `opencode`)                               |
-| `autoOpenCodeCommand`         | No       | Command to run (default: `["opencode", "run"]`)                 |
-| `autoOpenCodeCommandPrefix`   | No       | In-room command prefix (default: `!oc`)                         |
-| `autoOpenCodeCwd`             | Yes      | Working directory for OpenCode                                  |
-| `autoOpenCodeSenderAllowlist` | Yes      | Allowed senders                                                 |
-| `autoOpenCodeTimeoutSeconds`  | No       | Timeout for OpenCode runs (default: 300, 0=disable)             |
-| `autoOpenCodeVerbosity`       | No       | Output mode: `output`, `debug`, `thinking`, `thinking-complete` |
+| Key                      | Required | Description                                                     |
+| ------------------------ | -------- | --------------------------------------------------------------- |
+| `roomId`                 | Yes      | Matrix room ID                                                  |
+| `prefix`                 | No       | Legacy prefix for message routing                               |
+| `agent`                  | No       | Agent label (default: `opencode`)                               |
+| `command`                | No       | Command to run (default: `["opencode", "run"]`)                 |
+| `commandPrefix`          | No       | In-room command prefix (default: `!oc`)                         |
+| `projectWorkingDirectory`| Yes      | Working directory for OpenCode                                  |
+| `senderAllowlist`        | Yes      | Allowed senders                                                 |
+| `timeoutSeconds`         | No       | Timeout for OpenCode runs (default: 300, 0=disable)             |
+| `verbosity`              | No       | Output mode: `output`, `debug`, `thinking`, `thinking-complete` |
 
 ### Verbosity Modes
 
@@ -184,8 +184,8 @@ bun run src/index.ts poll-user my-project --block 30
 
 - **Sync State**: Matrix sync position stored at Redis key `matrix-agent:sync:next-batch:v1`
 - **Message Format**: Outbound messages support Markdown, converted to Matrix HTML
-- **Security**: `autoOpenCodeCommand` runs with the process's permissions - treat as privileged config
-- **Legacy**: `autoCodex*` config keys are no longer supported
+- **Security**: `command` runs with the process's permissions - treat as privileged config
+- **Legacy**: `autoCodex*` and `autoOpenCode*` config keys are no longer supported
 
 ## Development
 
