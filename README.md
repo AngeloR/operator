@@ -1,200 +1,204 @@
 # matrix-agent
 
-`matrix-agent` is now the **relay core**.
+A Matrix-to-OpenCode bridge that lets you interact with OpenCode (AI coding assistant) directly from Matrix chat rooms.
 
-It bridges Matrix <-> Redis and exposes a small HTTP facade, with optional built-in autoOpenCode workers per project.
+## What It Is
 
-## Architecture
+`matrix-agent` is a relay service that:
 
-Single relay-core process:
+- Connects to your Matrix homeserver and monitors configured rooms for messages
+- Optionally runs OpenCode to respond to messages automatically using AI
+- Provides an HTTP API for external agents to send/receive messages via Redis queues
+- Supports in-room CLI commands for checking usage, models, and managing model overrides
 
-1. Matrix ingress: room message -> Redis `[project]:user`
-2. Matrix egress: Redis `[project]:agent` -> room message
-3. Optional autoOpenCode workers consume `[project]:user` and publish to `[project]:agent`
-4. HTTP facade (`/v1/agent/poll`, `/v1/agent/send`) for external agent processes
+## How It Works
 
-## Install
+```mermaid
+flowchart LR
+    A[Matrix Room] -->|messages| B[matrix-agent<br/>relay-core]
+    B -->|queue| C[Redis Queue]
+    B -->|spawn| D[OpenCode]
+    
+    C -->|poll| E[External Agents]
+    E -->|send| C
+```
+
+1. **Matrix Ingress**: Messages from configured rooms are queued to Redis (`[project]:user`)
+2. **Matrix Egress**: Agent responses from Redis (`[project]:agent`) are sent to rooms
+3. **Auto OpenCode**: When enabled, automatically runs OpenCode to process user messages
+4. **HTTP API**: External services can poll/send via `/v1/agent/poll` and `/v1/agent/send`
+
+## Installation
+
+### Prerequisites
+
+- [Bun](https://bun.sh/) runtime
+- Redis server
+- Matrix homeserver account with access token
+- OpenCode CLI (optional, for auto-response feature)
+
+### Setup
+
+1. Install dependencies:
 
 ```bash
 bun install
+```
+
+2. Create your config file:
+
+```bash
 cp config.example.json config.json
 ```
 
-## Relay Core Config (`config.json`)
+3. Edit `config.json` with your settings:
+   - `homeserverUrl`: Your Matrix server URL (e.g., `https://matrix.org`)
+   - `accessToken`: Your Matrix access token (get from Element: Settings > Help & About > Advanced)
+   - `adminUserIds`: List of Matrix user IDs allowed to trigger bot responses
+   - `agentApiToken`: Secret token for HTTP API access
+   - `redisUrl`: Redis connection URL
+
+4. Configure projects (rooms the bot should monitor):
 
 ```json
 {
-  "port": 8888,
-  "homeserverUrl": "http://your-matrix-server:8008",
-  "accessToken": "syt_...",
-  "adminUserIds": ["@admin:your-server"],
-  "agentApiToken": "replace-with-long-random-token",
-  "redisUrl": "redis://127.0.0.1:6379/0",
-  "autoOpenCodeProjectModelOverrides": {
-    "matrix-router": "openai/gpt-5.3-codex"
-  },
   "projects": {
-    "antares": {
-      "roomId": "!yourRoomId:your-server"
-    },
-    "matrix-router": {
-      "roomId": "!anotherRoomId:your-server",
+    "my-project": {
+      "roomId": "!abc123:matrix.org",
       "autoOpenCode": true,
-      "autoOpenCodeAgent": "opencode",
-      "autoOpenCodeCommand": ["opencode", "run"],
-      "autoOpenCodeCommandPrefix": "!oc",
-      "autoOpenCodeAllowedCliCommands": ["usage", "stats", "models", "model", "help"],
-      "autoOpenCodeCommandTimeoutSeconds": 30,
-      "autoOpenCodeTimeoutSeconds": 300,
-      "autoOpenCodeHeartbeatSeconds": 45,
-      "autoOpenCodeVerbosity": "output",
-      "autoOpenCodeSenderAllowlist": ["@admin:your-server"],
-      "autoOpenCodeProgressUpdates": true,
-      "autoOpenCodeStateDir": ".matrix-agent-state",
-      "autoOpenCodeCwd": "/abs/path/to/project",
-      "autoOpenCodeAckTemplate": "Received. Starting OpenCode job {{job_id}}.",
-      "autoOpenCodeProgressTemplate": "OpenCode {{phase}} (job {{job_id}}).",
-      "autoOpenCodeContextTailLines": 60
+      "autoOpenCodeCwd": "/path/to/your/codebase",
+      "autoOpenCodeSenderAllowlist": ["@you:matrix.org"]
     }
   }
 }
 ```
 
-Notes:
-- `agentApiToken` or `agentApiTokens` is required to use `/v1/agent/*` routes.
-- `/v1/metrics` is public (same access model as `/v1/health`).
-- `adminUserIds` gates which Matrix senders are enqueued into `[project]:user`.
-- Sync checkpoint is stored at Redis key `matrix-agent:sync:next-batch:v1`.
-- `autoOpenCode` is optional per project. When enabled, relay-core consumes `[project]:user`, runs the configured command with a rolling context bundle on stdin, and sends replies to `[project]:agent`.
-- Legacy `autoCodex*` keys are no longer supported; startup fails fast if they are still present.
-- Outbound Matrix messages are sent as provided (no automatic `[agent]` prefix in message text).
-- Relay converts markdown payloads to Matrix HTML (`org.matrix.custom.html`) for outbound messages.
-- `autoOpenCodeSenderAllowlist` is required when `autoOpenCode` is enabled.
-- `autoOpenCodeCommand` executes on the host with this process's permissions; treat it as privileged configuration.
-- `autoOpenCodeAgent` is an optional internal agent label used for context/state partitioning.
-- `autoOpenCodeCommand` must invoke `opencode run`; relay automatically enforces `--format json` and adds `--thinking` for `thinking` / `thinking-complete` verbosity modes.
-- In-room commands are available with `autoOpenCodeCommandPrefix` (default `!oc`) and run on an allowlist (`autoOpenCodeAllowedCliCommands`, default `usage/stats/models/model/help`).
-- `autoOpenCodeProjectModelOverrides` is an optional top-level map of project keys to model IDs. `!oc model` updates this map.
-- `autoOpenCodeCommandTimeoutSeconds` defaults to `30` for prefixed in-room commands.
-- `autoOpenCodeTimeoutSeconds` defaults to `300`; set `0` to disable timeout and force a 15-minute heartbeat while OpenCode is running.
-- `autoOpenCodeHeartbeatSeconds` defaults to `45`; heartbeat updates are sent in debug mode for long-running jobs. Set `0` to disable timed heartbeats.
-- `autoOpenCodeVerbosity` defaults to `"output"` and controls status visibility:
-- `"debug"`: emit full status stream (ack + planning/executing/stream/heartbeat/finalizing) plus final output.
-- `"thinking"`: emit title-only thinking updates (one line per reasoning section title) plus final output.
-- `"thinking-complete"`: emit full thinking stream text and suppress duplicate final output when a stream already produced content.
-- `"output"`: emit only `Received.` acknowledgement plus final output.
-- `autoOpenCodeCwd` sets the working directory used for `autoOpenCodeCommand` and is validated at daemon startup. If omitted, relay-core uses its own current working directory.
-
-In-room command examples (default prefix):
-- `!oc usage openai/gpt-5.3-codex --days 30`
-- `!oc stats --models --days 7`
-- `!oc models`
-- `!oc model`
-- `!oc model openai/gpt-5.3-codex`
-- `!oc model reset`
-
-## Run
-
-Start full daemon (worker loops + HTTP facade):
+5. Run the daemon:
 
 ```bash
 bun run src/index.ts
 ```
 
-or explicitly:
+## In-Room Commands
+
+When `autoOpenCode` is enabled, you can use these commands directly in Matrix rooms:
+
+| Command                           | Description                                  |
+| --------------------------------- | -------------------------------------------- |
+| `!oc usage <model> [--days N]`    | Show usage stats for a specific model        |
+| `!oc stats [--days N] [--models]` | Show overall usage statistics                |
+| `!oc models [--verbose]`          | List available models                        |
+| `!oc model`                       | Show current model override for this project |
+| `!oc model <model-id>`            | Set a model override for this project        |
+| `!oc model reset`                 | Clear model override (use OpenCode default)  |
+| `!oc help`                        | Show command help                            |
+
+Example:
+
+```
+!oc usage openai/gpt-5.3-codex --days 30
+!oc model openai/gpt-4-turbo
+```
+
+## HTTP API
+
+The relay exposes an HTTP API for external agents:
+
+### Health Check
 
 ```bash
-bun run src/index.ts daemon
+curl http://localhost:8888/v1/health
 ```
 
-## HTTP Facade
-
-Health:
+### Poll for Messages
 
 ```bash
-curl -sS http://localhost:8888/v1/health
+curl -X POST http://localhost:8888/v1/agent/poll \
+  -H "Authorization: Bearer $AGENT_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"project":"my-project","agent":"bot","block_seconds":30}'
 ```
 
-Poll inbound message:
+### Send a Message
 
 ```bash
-curl -sS -X POST http://localhost:8888/v1/agent/poll \
-  -H "content-type: application/json" \
-  -H "authorization: Bearer $AGENT_API_TOKEN" \
-  -d '{"project":"matrix-router","agent":"agent-a","block_seconds":30}'
+curl -X POST http://localhost:8888/v1/agent/send \
+  -H "Authorization: Bearer $AGENT_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"project":"my-project","agent":"bot","markdown":"Hello!","format":"markdown"}'
 ```
 
-Queue outbound message:
+### Metrics
 
 ```bash
-curl -sS -X POST http://localhost:8888/v1/agent/send \
-  -H "content-type: application/json" \
-  -H "authorization: Bearer $AGENT_API_TOKEN" \
-  -d '{"project":"matrix-router","agent":"agent-a","markdown":"hello from agent","format":"markdown"}'
+curl http://localhost:8888/v1/metrics
 ```
 
-Metrics:
+## Configuration Reference
 
-```bash
-curl -sS http://localhost:8888/v1/metrics
-```
+### Top-Level Options
 
-Response shape:
+| Key             | Required | Description                                     |
+| --------------- | -------- | ----------------------------------------------- |
+| `port`          | No       | HTTP server port (default: 8888)                |
+| `homeserverUrl` | Yes      | Matrix homeserver URL                           |
+| `accessToken`   | Yes      | Matrix bot access token                         |
+| `adminUserIds`  | No       | User IDs allowed to enqueue messages            |
+| `agentApiToken` | No\*     | Token for HTTP API (\*required if using API)    |
+| `redisUrl`      | No       | Redis URL (default: `redis://localhost:6379/0`) |
 
-```json
-{
-  "ok": true,
-  "generatedAt": "2026-02-18T00:00:00.000Z",
-  "queueDepth": {
-    "total": 0,
-    "byQueue": { "matrix-router:user": 0, "matrix-router:agent": 0 },
-    "byProject": { "matrix-router": { "user": 0, "agent": 0, "total": 0 } }
-  },
-  "workerRestarts": { "total": 0, "byProject": {} },
-  "failures": { "total": 0, "byCategory": {}, "byProject": {} },
-  "processingLatency": {
-    "overall": {
-      "count": 0,
-      "sumMs": 0,
-      "minMs": null,
-      "maxMs": null,
-      "avgMs": null,
-      "p50Ms": null,
-      "p95Ms": null,
-      "sampleCount": 0
-    },
-    "byOperation": {}
-  }
-}
-```
+### Project Options
 
-## Observability
+| Key                           | Required | Description                                                     |
+| ----------------------------- | -------- | --------------------------------------------------------------- |
+| `roomId`                      | Yes      | Matrix room ID                                                  |
+| `prefix`                      | No       | Legacy prefix for message routing                               |
+| `autoOpenCode`                | No       | Enable automatic OpenCode responses                             |
+| `autoOpenCodeAgent`           | No       | Agent label (default: `opencode`)                               |
+| `autoOpenCodeCommand`         | No       | Command to run (default: `["opencode", "run"]`)                 |
+| `autoOpenCodeCommandPrefix`   | No       | In-room command prefix (default: `!oc`)                         |
+| `autoOpenCodeCwd`             | No       | Working directory for OpenCode                                  |
+| `autoOpenCodeSenderAllowlist` | Yes\*    | Allowed senders (\*required if autoOpenCode enabled)            |
+| `autoOpenCodeTimeoutSeconds`  | No       | Timeout for OpenCode runs (default: 300, 0=disable)             |
+| `autoOpenCodeVerbosity`       | No       | Output mode: `output`, `debug`, `thinking`, `thinking-complete` |
 
-- Daemon logs are structured JSON.
-- Every log event includes these base fields: `timestamp`, `level`, `event`, `projectKey`, `jobId`, `queue`, `sender`, `durationMs`.
+### Verbosity Modes
 
-## Redis Queue Model
-
-Per project key:
-- `[project]:user`: Matrix/admin -> agent
-- `[project]:agent`: agent -> Matrix
+- `output`: Acknowledgment + final output only (default)
+- `debug`: Full status stream + output
+- `thinking`: Reasoning section titles + output
+- `thinking-complete`: Full reasoning stream, suppress duplicate final output
 
 ## CLI Debug Commands
 
-Push agent message:
-
 ```bash
-bun run src/index.ts push-agent matrix-router "hello"
+# Push agent message to queue
+bun run src/index.ts push-agent my-project "Hello from CLI"
+
+# Push user message to queue
+bun run src/index.ts push-user my-project "Run tests" --sender @admin:matrix.org
+
+# Poll user messages
+bun run src/index.ts poll-user my-project --block 30
 ```
 
-Push user message:
+## Architecture Notes
+
+- **Sync State**: Matrix sync position stored at Redis key `matrix-agent:sync:next-batch:v1`
+- **Message Format**: Outbound messages support Markdown, converted to Matrix HTML
+- **Security**: `autoOpenCodeCommand` runs with the process's permissions - treat as privileged config
+- **Legacy**: `autoCodex*` config keys are no longer supported
+
+## Development
+
+Run tests:
 
 ```bash
-bun run src/index.ts push-user matrix-router "run diagnostics" --sender @admin:example
+bun test
 ```
 
-Poll user message:
+Type check:
 
 ```bash
-bun run src/index.ts poll-user matrix-router --block 30
+bunx tsc --noEmit
 ```
