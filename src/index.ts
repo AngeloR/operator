@@ -36,6 +36,9 @@ type ProjectConfig = {
   autoOpenCode?: boolean;
   autoOpenCodeAgent?: string;
   autoOpenCodeCommand?: string[];
+  autoOpenCodeCommandPrefix?: string;
+  autoOpenCodeAllowedCliCommands?: string[];
+  autoOpenCodeCommandTimeoutSeconds?: number;
   autoOpenCodeTimeoutSeconds?: number;
   autoOpenCodeHeartbeatSeconds?: number;
   autoOpenCodeVerbosity?: string;
@@ -149,6 +152,9 @@ type AutoOpenCodeProject = {
   roomId: string;
   agent: string;
   command: string[];
+  commandPrefix: string;
+  allowedCliCommands: Set<AutoOpenCodeCliCommand>;
+  commandTimeoutMs: number;
   timeoutMs: number | null;
   heartbeatMs: number;
   verbosity: AutoOpenCodeVerbosity;
@@ -192,10 +198,20 @@ type AutoOpenCodeStreamHandlers = {
   onThinkingTitle?: (title: string) => void;
 };
 
+type AutoOpenCodeCliCommand = "usage" | "stats" | "models" | "help";
+
+type ParsedAutoOpenCodeCliRequest = {
+  command: AutoOpenCodeCliCommand;
+  args: string[];
+};
+
 const cfg = config as AppConfig;
 const projects = cfg.projects ?? {};
 const SYNC_TOKEN_KEY = "matrix-agent:sync:next-batch:v1";
 const DEFAULT_AUTO_OPENCODE_COMMAND = ["opencode", "run"];
+const DEFAULT_AUTO_OPENCODE_COMMAND_PREFIX = "!oc";
+const DEFAULT_AUTO_OPENCODE_ALLOWED_CLI_COMMANDS = ["usage", "stats", "models", "help"];
+const DEFAULT_AUTO_OPENCODE_COMMAND_TIMEOUT_SECONDS = 30;
 const DEFAULT_AUTO_OPENCODE_TIMEOUT_SECONDS = 300;
 const DEFAULT_AUTO_OPENCODE_HEARTBEAT_SECONDS = 45;
 const AUTO_OPENCODE_INFINITE_TIMEOUT_HEARTBEAT_MS = 15 * 60 * 1000;
@@ -215,6 +231,12 @@ const AUTO_OPENCODE_STREAM_UPDATE_MIN_CHARS = 200;
 const AUTO_OPENCODE_STREAM_PREVIEW_MAX_CHARS = 4000;
 const AUTO_OPENCODE_WORKER_RESTART_BASE_DELAY_MS = 1000;
 const AUTO_OPENCODE_WORKER_RESTART_MAX_DELAY_MS = 30_000;
+const AUTO_OPENCODE_CLI_ALLOWED_COMMANDS = new Set<AutoOpenCodeCliCommand>([
+  "usage",
+  "stats",
+  "models",
+  "help",
+]);
 
 if (!cfg.homeserverUrl || !cfg.accessToken) {
   throw new Error("config.json must include homeserverUrl and accessToken");
@@ -378,6 +400,69 @@ function parseAutoOpenCodeCommand(value: unknown): string[] | null {
   }
 
   return command;
+}
+
+function parseAutoOpenCodeCommandPrefix(value: unknown): string {
+  if (value === undefined) {
+    return DEFAULT_AUTO_OPENCODE_COMMAND_PREFIX;
+  }
+
+  const parsed = nonEmptyText(value);
+  if (!parsed) {
+    throw new Error("autoOpenCodeCommandPrefix must be a non-empty string");
+  }
+
+  return parsed;
+}
+
+function parseAutoOpenCodeAllowedCliCommands(
+  value: unknown,
+): Set<AutoOpenCodeCliCommand> {
+  if (value === undefined) {
+    return new Set(
+      DEFAULT_AUTO_OPENCODE_ALLOWED_CLI_COMMANDS as AutoOpenCodeCliCommand[],
+    );
+  }
+
+  if (!Array.isArray(value)) {
+    throw new Error("autoOpenCodeAllowedCliCommands must be an array of strings");
+  }
+
+  const commands = value
+    .map((item) => (typeof item === "string" ? item.trim().toLowerCase() : ""))
+    .filter((item) => item.length > 0);
+
+  if (commands.length === 0) {
+    throw new Error("autoOpenCodeAllowedCliCommands must include at least one command");
+  }
+
+  for (const command of commands) {
+    if (
+      command !== "usage" &&
+      command !== "stats" &&
+      command !== "models" &&
+      command !== "help"
+    ) {
+      throw new Error(
+        "autoOpenCodeAllowedCliCommands entries must be one of: usage, stats, models, help",
+      );
+    }
+  }
+
+  return new Set(commands as AutoOpenCodeCliCommand[]);
+}
+
+function parseAutoOpenCodeCommandTimeoutSeconds(value: unknown): number {
+  if (value === undefined) {
+    return DEFAULT_AUTO_OPENCODE_COMMAND_TIMEOUT_SECONDS;
+  }
+
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1 || n > 300) {
+    throw new Error("autoOpenCodeCommandTimeoutSeconds must be an integer between 1 and 300");
+  }
+
+  return n;
 }
 
 function parseAutoOpenCodeCwd(value: unknown): string {
@@ -572,6 +657,13 @@ function buildAutoOpenCodeMap(): Map<string, AutoOpenCodeProject> {
 
     const command = parseAutoOpenCodeCommand(project.autoOpenCodeCommand) ??
       DEFAULT_AUTO_OPENCODE_COMMAND;
+    const commandPrefix = parseAutoOpenCodeCommandPrefix(project.autoOpenCodeCommandPrefix);
+    const allowedCliCommands = parseAutoOpenCodeAllowedCliCommands(
+      project.autoOpenCodeAllowedCliCommands,
+    );
+    const commandTimeoutSeconds = parseAutoOpenCodeCommandTimeoutSeconds(
+      project.autoOpenCodeCommandTimeoutSeconds,
+    );
     if (!isOpenCodeRunCommand(command)) {
       throw new Error(
         `project "${projectKey}" has invalid autoOpenCodeCommand: expected opencode run`,
@@ -624,6 +716,9 @@ function buildAutoOpenCodeMap(): Map<string, AutoOpenCodeProject> {
         nonEmptyText(project.prefix) ??
         "opencode",
       command,
+      commandPrefix,
+      allowedCliCommands,
+      commandTimeoutMs: commandTimeoutSeconds * 1000,
       timeoutMs: timeoutSeconds === 0 ? null : timeoutSeconds * 1000,
       heartbeatMs: heartbeatSeconds * 1000,
       verbosity,
@@ -1226,6 +1321,382 @@ async function runCommandWithInput(
   });
 }
 
+function stripAnsi(input: string): string {
+  return input.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, "");
+}
+
+function splitCommandTokens(input: string): string[] {
+  const tokens: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | null = null;
+  let escapeNext = false;
+
+  for (const char of input) {
+    if (escapeNext) {
+      current += char;
+      escapeNext = false;
+      continue;
+    }
+
+    if (char === "\\") {
+      escapeNext = true;
+      continue;
+    }
+
+    if (quote) {
+      if (char === quote) {
+        quote = null;
+      } else {
+        current += char;
+      }
+      continue;
+    }
+
+    if (char === "'" || char === '"') {
+      quote = char;
+      continue;
+    }
+
+    if (/\s/.test(char)) {
+      if (current.length > 0) {
+        tokens.push(current);
+        current = "";
+      }
+      continue;
+    }
+
+    current += char;
+  }
+
+  if (escapeNext) {
+    current += "\\";
+  }
+
+  if (current.length > 0) {
+    tokens.push(current);
+  }
+
+  return tokens;
+}
+
+function parseAutoOpenCodeCliRequest(
+  message: string,
+  prefix: string,
+): ParsedAutoOpenCodeCliRequest | null {
+  const trimmed = message.trim();
+  if (!trimmed.startsWith(prefix)) {
+    return null;
+  }
+
+  const nextChar = trimmed.charAt(prefix.length);
+  if (nextChar && !/\s/.test(nextChar)) {
+    return null;
+  }
+
+  const rest = trimmed.slice(prefix.length).trim();
+  const tokens = splitCommandTokens(rest);
+  const commandToken = tokens[0]?.toLowerCase() ?? "help";
+  if (!AUTO_OPENCODE_CLI_ALLOWED_COMMANDS.has(commandToken as AutoOpenCodeCliCommand)) {
+    return {
+      command: "help",
+      args: [],
+    };
+  }
+
+  return {
+    command: commandToken as AutoOpenCodeCliCommand,
+    args: tokens.slice(1),
+  };
+}
+
+function parsePositiveInteger(value: string, fieldName: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${fieldName} must be a positive integer`);
+  }
+  return parsed;
+}
+
+function parseUsageCommandArgs(args: string[]): { model: string; days?: number; project?: string } {
+  const model = nonEmptyText(args[0]);
+  if (!model) {
+    throw new Error("usage command requires a model (example: !oc usage openai/gpt-5.3-codex --days 30)");
+  }
+
+  let days: number | undefined;
+  let project: string | undefined;
+
+  for (let i = 1; i < args.length; i += 1) {
+    const token = args[i];
+    if (!token) {
+      continue;
+    }
+    if (token === "--days") {
+      const value = args[i + 1];
+      if (!value) {
+        throw new Error("--days requires a value");
+      }
+      days = parsePositiveInteger(value, "days");
+      i += 1;
+      continue;
+    }
+
+    if (token.startsWith("--days=")) {
+      days = parsePositiveInteger(token.slice("--days=".length), "days");
+      continue;
+    }
+
+    if (token === "--project") {
+      const value = nonEmptyText(args[i + 1]);
+      if (!value) {
+        throw new Error("--project requires a value");
+      }
+      project = value;
+      i += 1;
+      continue;
+    }
+
+    if (token.startsWith("--project=")) {
+      const value = nonEmptyText(token.slice("--project=".length));
+      if (!value) {
+        throw new Error("--project requires a non-empty value");
+      }
+      project = value;
+      continue;
+    }
+
+    throw new Error(`unsupported option for usage command: ${token}`);
+  }
+
+  return { model, days, project };
+}
+
+function parseStatsCommandArgs(args: string[]): string[] {
+  const command = ["opencode", "stats"];
+
+  for (let i = 0; i < args.length; i += 1) {
+    const token = args[i];
+    if (!token) {
+      continue;
+    }
+    if (token === "--days") {
+      const value = args[i + 1];
+      if (!value) {
+        throw new Error("--days requires a value");
+      }
+      parsePositiveInteger(value, "days");
+      command.push("--days", value);
+      i += 1;
+      continue;
+    }
+
+    if (token.startsWith("--days=")) {
+      const value = token.slice("--days=".length);
+      parsePositiveInteger(value, "days");
+      command.push(`--days=${value}`);
+      continue;
+    }
+
+    if (token === "--models") {
+      const maybeValue = args[i + 1];
+      if (maybeValue && !maybeValue.startsWith("--")) {
+        parsePositiveInteger(maybeValue, "models");
+        command.push("--models", maybeValue);
+        i += 1;
+      } else {
+        command.push("--models");
+      }
+      continue;
+    }
+
+    if (token.startsWith("--models=")) {
+      const value = token.slice("--models=".length);
+      if (value.length > 0) {
+        parsePositiveInteger(value, "models");
+      }
+      command.push(`--models=${value}`);
+      continue;
+    }
+
+    if (token === "--project") {
+      const value = nonEmptyText(args[i + 1]);
+      if (!value) {
+        throw new Error("--project requires a value");
+      }
+      command.push("--project", value);
+      i += 1;
+      continue;
+    }
+
+    if (token.startsWith("--project=")) {
+      const value = nonEmptyText(token.slice("--project=".length));
+      if (!value) {
+        throw new Error("--project requires a non-empty value");
+      }
+      command.push(`--project=${value}`);
+      continue;
+    }
+
+    throw new Error(`unsupported option for stats command: ${token}`);
+  }
+
+  return command;
+}
+
+function parseModelsCommandArgs(args: string[]): string[] {
+  const command = ["opencode", "models"];
+
+  for (let i = 0; i < args.length; i += 1) {
+    const token = args[i];
+    if (!token) {
+      continue;
+    }
+    if (token === "--verbose" || token === "--refresh") {
+      command.push(token);
+      continue;
+    }
+
+    if (token.startsWith("--")) {
+      throw new Error(`unsupported option for models command: ${token}`);
+    }
+
+    if (command.length > 2) {
+      throw new Error("models command accepts at most one provider positional argument");
+    }
+    command.push(token);
+  }
+
+  return command;
+}
+
+function extractModelUsageBlock(output: string, model: string): string | null {
+  const lines = output.replace(/\r\n/g, "\n").split("\n");
+  const needle = model.toLowerCase();
+  const start = lines.findIndex((line) => line.toLowerCase().includes(needle));
+  if (start < 0) {
+    return null;
+  }
+
+  const block: string[] = [];
+  for (let i = start; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (line === undefined) {
+      break;
+    }
+    if (i > start && line.includes("├") && !line.includes("│")) {
+      break;
+    }
+    if (i > start && line.includes("└") && !line.includes("│")) {
+      break;
+    }
+    if (line.trim().length === 0 && block.length > 0) {
+      break;
+    }
+    block.push(line);
+  }
+
+  const compact = block.join("\n").trim();
+  return compact.length > 0 ? compact : null;
+}
+
+function autoOpenCodeCliHelp(prefix: string): string {
+  return [
+    `OpenCode command mode is available with the ${prefix} prefix.`,
+    "",
+    `- ${prefix} usage <model> [--days N] [--project KEY]`,
+    `- ${prefix} stats [--days N] [--models [N]] [--project KEY]`,
+    `- ${prefix} models [provider] [--verbose] [--refresh]`,
+    `- ${prefix} help`,
+  ].join("\n");
+}
+
+async function executeAutoOpenCodeCliCommand(
+  request: ParsedAutoOpenCodeCliRequest,
+  autoProject: AutoOpenCodeProject,
+): Promise<string> {
+  if (request.command === "help") {
+    return autoOpenCodeCliHelp(autoProject.commandPrefix);
+  }
+
+  if (!autoProject.allowedCliCommands.has(request.command)) {
+    throw new Error(
+      `command ${request.command} is disabled for this project (allowed: ${[...autoProject.allowedCliCommands].join(", ")})`,
+    );
+  }
+
+  let command: string[];
+  let modelFilter: string | null = null;
+
+  if (request.command === "usage") {
+    const { model, days, project } = parseUsageCommandArgs(request.args);
+    modelFilter = model;
+    command = ["opencode", "stats", "--models"];
+    if (days !== undefined) {
+      command.push("--days", String(days));
+    }
+    if (project) {
+      command.push("--project", project);
+    }
+  } else if (request.command === "stats") {
+    command = parseStatsCommandArgs(request.args);
+  } else {
+    command = parseModelsCommandArgs(request.args);
+  }
+
+  const result = await runCommandWithInput(
+    command,
+    autoProject.cwd,
+    "",
+    autoProject.commandTimeoutMs,
+  );
+
+  if (result.timedOut) {
+    throw new Error(
+      `command timed out after ${Math.round(autoProject.commandTimeoutMs / 1000)}s`,
+    );
+  }
+
+  if (result.code !== 0) {
+    const stderr = nonEmptyText(stripAnsi(result.stderr));
+    const stdout = nonEmptyText(stripAnsi(result.stdout));
+    throw new Error(stderr ?? stdout ?? `command exited with code ${result.code ?? "null"}`);
+  }
+
+  const cleaned = stripAnsi(result.stdout).trim();
+  if (!cleaned) {
+    throw new Error("command produced no output");
+  }
+
+  if (request.command === "usage" && modelFilter) {
+    const modelBlock = extractModelUsageBlock(cleaned, modelFilter);
+    if (!modelBlock) {
+      return [
+        `No usage section found for model \`${modelFilter}\`.`,
+        "",
+        "Try running one of:",
+        `- ${autoProject.commandPrefix} stats --models`,
+        `- ${autoProject.commandPrefix} models`,
+      ].join("\n");
+    }
+
+    return [
+      `Usage for \`${modelFilter}\`:`,
+      "",
+      "```text",
+      truncateText(modelBlock, AUTO_OPENCODE_MAX_CONTEXT_CHARS),
+      "```",
+    ].join("\n");
+  }
+
+  return [
+    `Ran \`${command.join(" ")}\``,
+    "",
+    "```text",
+    truncateText(cleaned, AUTO_OPENCODE_MAX_CONTEXT_CHARS),
+    "```",
+  ].join("\n");
+}
+
 function resolveAutoOpenCodeStatePaths(autoProject: AutoOpenCodeProject): AutoOpenCodeStatePaths {
   const rootDir = join(autoProject.stateDir, autoProject.projectKey, autoProject.agent);
   return {
@@ -1797,6 +2268,9 @@ Project-level autoOpenCode (optional):
   autoOpenCode: true
   autoOpenCodeAgent: "opencode"                              # optional internal agent label (state/context)
   autoOpenCodeCommand: ["opencode","run"]                    # relay enforces JSON stream mode and requires opencode run
+  autoOpenCodeCommandPrefix: "!oc"                            # in-room command prefix for opencode CLI shortcuts
+  autoOpenCodeAllowedCliCommands: ["usage","stats","models","help"] # command allowlist
+  autoOpenCodeCommandTimeoutSeconds: 30                        # timeout for prefixed in-room opencode commands
   autoOpenCodeTimeoutSeconds: 300                         # timeout per message (0 disables timeout + forces 15m heartbeat)
   autoOpenCodeHeartbeatSeconds: 45                        # periodic heartbeat for debug mode (0 disables)
   autoOpenCodeVerbosity: "output"                         # output|thinking|thinking-complete|debug
@@ -2028,6 +2502,56 @@ async function runAutoOpenCodeProjectWorker(
           reason: "duplicate_event",
           queuedUserEventId: envelope.id,
         });
+        continue;
+      }
+
+      const cliRequest = parseAutoOpenCodeCliRequest(
+        envelope.body,
+        autoProject.commandPrefix,
+      );
+      if (cliRequest) {
+        const startedAt = Date.now();
+        try {
+          const response = await executeAutoOpenCodeCliCommand(cliRequest, autoProject);
+          const outbound = await enqueueAutoOpenCodeMessage(
+            autoOpenCodeRedis,
+            autoProject,
+            truncateText(response, AUTO_OPENCODE_MAX_CONTEXT_CHARS),
+            "markdown",
+          );
+          const durationMs = Date.now() - startedAt;
+          recordProcessingLatency("auto_opencode_cli", durationMs);
+          logEvent("info", "auto_opencode.cli.completed", {
+            projectKey: autoProject.projectKey,
+            queue: poppedQueue,
+            sender,
+            durationMs,
+            command: cliRequest.command,
+            queuedUserEventId: envelope.id,
+            queuedAgentEventId: outbound.id,
+          });
+        } catch (error: unknown) {
+          const detail = error instanceof Error ? error.message : "OpenCode command failed";
+          const durationMs = Date.now() - startedAt;
+          recordFailure("auto_opencode_cli", autoProject.projectKey);
+          recordProcessingLatency("auto_opencode_cli", durationMs);
+          const outbound = await enqueueAutoOpenCodeMessage(
+            autoOpenCodeRedis,
+            autoProject,
+            `OpenCode command failed: ${detail}`,
+            "plain",
+          );
+          logEvent("warn", "auto_opencode.cli.failed", {
+            projectKey: autoProject.projectKey,
+            queue: poppedQueue,
+            sender,
+            durationMs,
+            command: cliRequest.command,
+            queuedUserEventId: envelope.id,
+            queuedAgentEventId: outbound.id,
+            error: detail,
+          });
+        }
         continue;
       }
 
@@ -2642,6 +3166,8 @@ async function commandDaemon(redisConfig: RedisConfig): Promise<void> {
     autoOpenCodeProjects: [...autoOpenCodeQueueToProject.values()].map((item) => ({
       projectKey: item.projectKey,
       command: item.command,
+      commandPrefix: item.commandPrefix,
+      allowedCliCommands: [...item.allowedCliCommands],
       cwd: item.cwd,
       senderAllowlistSize: item.senderAllowlist.size,
     })),

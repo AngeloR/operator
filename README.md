@@ -39,6 +39,9 @@ cp config.example.json config.json
       "autoOpenCode": true,
       "autoOpenCodeAgent": "opencode",
       "autoOpenCodeCommand": ["opencode", "run"],
+      "autoOpenCodeCommandPrefix": "!oc",
+      "autoOpenCodeAllowedCliCommands": ["usage", "stats", "models", "help"],
+      "autoOpenCodeCommandTimeoutSeconds": 30,
       "autoOpenCodeTimeoutSeconds": 300,
       "autoOpenCodeHeartbeatSeconds": 45,
       "autoOpenCodeVerbosity": "output",
@@ -67,6 +70,8 @@ Notes:
 - `autoOpenCodeCommand` executes on the host with this process's permissions; treat it as privileged configuration.
 - `autoOpenCodeAgent` is an optional internal agent label used for context/state partitioning.
 - `autoOpenCodeCommand` must invoke `opencode run`; relay automatically enforces `--format json` and adds `--thinking` for `thinking` / `thinking-complete` verbosity modes.
+- In-room commands are available with `autoOpenCodeCommandPrefix` (default `!oc`) and run on an allowlist (`autoOpenCodeAllowedCliCommands`, default `usage/stats/models/help`).
+- `autoOpenCodeCommandTimeoutSeconds` defaults to `30` for prefixed in-room commands.
 - `autoOpenCodeTimeoutSeconds` defaults to `300`; set `0` to disable timeout and force a 15-minute heartbeat while OpenCode is running.
 - `autoOpenCodeHeartbeatSeconds` defaults to `45`; heartbeat updates are sent in debug mode for long-running jobs. Set `0` to disable timed heartbeats.
 - `autoOpenCodeVerbosity` defaults to `"output"` and controls status visibility:
@@ -75,6 +80,11 @@ Notes:
 - `"thinking-complete"`: emit full thinking stream text and suppress duplicate final output when a stream already produced content.
 - `"output"`: emit only `Received.` acknowledgement plus final output.
 - `autoOpenCodeCwd` sets the working directory used for `autoOpenCodeCommand` and is validated at daemon startup. If omitted, relay-core uses its own current working directory.
+
+In-room command examples (default prefix):
+- `!oc usage openai/gpt-5.3-codex --days 30`
+- `!oc stats --models --days 7`
+- `!oc models`
 
 ## Run
 
