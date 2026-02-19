@@ -55,20 +55,73 @@ function isReasoningPart(part: Record<string, unknown> | null): boolean {
   return partType === "reasoning" || partType === "thinking";
 }
 
-function parseReasoningTitleFromPayload(
-  payload: Record<string, unknown>,
-  eventType: string,
-): string | null {
-  if (eventType !== "message.part.updated") {
-    return null;
+function hasReasoningMarker(value: string | null): boolean {
+  if (!value) {
+    return false;
   }
 
-  const part = extractPart(payload);
-  if (!part) {
-    return null;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "reasoning" ||
+    normalized === "thinking" ||
+    normalized.startsWith("reasoning.") ||
+    normalized.startsWith("thinking.") ||
+    normalized.endsWith(".reasoning") ||
+    normalized.endsWith(".thinking") ||
+    normalized.includes("reasoning") ||
+    normalized.includes("thinking");
+}
+
+function isReasoningEventType(eventType: string): boolean {
+  return hasReasoningMarker(eventType);
+}
+
+function parseReasoningMode(payload: Record<string, unknown>): boolean {
+  const directFields = [
+    payload.mode,
+    payload.channel,
+    payload.kind,
+    payload.stream,
+    payload.role,
+    payload.message_type,
+    payload.messageType,
+    asObject(payload.metadata)?.mode,
+    asObject(payload.metadata)?.channel,
+  ];
+
+  for (const field of directFields) {
+    if (hasReasoningMarker(nonEmptyText(field))) {
+      return true;
+    }
   }
 
-  if (!isReasoningPart(part)) {
+  const data = asObject(payload.data);
+  if (!data) {
+    return false;
+  }
+
+  const nestedFields = [
+    data.mode,
+    data.channel,
+    data.kind,
+    data.stream,
+    data.role,
+    data.message_type,
+    data.messageType,
+    asObject(data.metadata)?.mode,
+    asObject(data.metadata)?.channel,
+  ];
+
+  for (const field of nestedFields) {
+    if (hasReasoningMarker(nonEmptyText(field))) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function parseReasoningTitlePart(part: Record<string, unknown> | null): string | null {
+  if (!part || !isReasoningPart(part)) {
     return null;
   }
 
@@ -78,6 +131,40 @@ function parseReasoningTitleFromPayload(
     nonEmptyText(part.heading) ??
     nonEmptyText(part.name) ??
     nonEmptyText(asObject(part.metadata)?.title);
+  if (directTitle) {
+    return normalizeReasoningTitle(directTitle);
+  }
+
+  const text = extractStreamText(part);
+  if (!text) {
+    return null;
+  }
+
+  return normalizeReasoningTitle(text);
+}
+
+function parseReasoningTitleFromPayload(
+  payload: Record<string, unknown>,
+  eventType: string,
+): string | null {
+  const part = extractPart(payload);
+  const partTitle = parseReasoningTitlePart(part);
+  if (partTitle) {
+    return partTitle;
+  }
+
+  const shouldInspectPayload = eventType === "message.part.updated" ||
+    isReasoningEventType(eventType) ||
+    parseReasoningMode(payload);
+  if (!shouldInspectPayload) {
+    return null;
+  }
+
+  const directTitle = nonEmptyText(payload.title) ??
+    nonEmptyText(payload.summary) ??
+    nonEmptyText(payload.heading) ??
+    nonEmptyText(payload.name) ??
+    nonEmptyText(asObject(payload.metadata)?.title);
   if (directTitle) {
     return normalizeReasoningTitle(directTitle);
   }
@@ -127,7 +214,9 @@ export function parseOpenCodeStreamEvent(payload: Record<string, unknown>): Open
   const eventType = normalizeEventType(payload);
   const phase = eventType ? truncateInline(eventType.replace(/\s+/g, " "), 80) : null;
   const partPayload = extractPart(payload);
-  const isReasoning = isReasoningPart(partPayload);
+  const isReasoning = isReasoningPart(partPayload) ||
+    parseReasoningMode(payload) ||
+    isReasoningEventType(eventType);
   const text = partPayload
     ? extractStreamText(partPayload)
     : extractStreamText(payload);

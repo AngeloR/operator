@@ -188,7 +188,7 @@ type AutoOpenCodeStatePaths = {
 
 type AutoOpenCodeStreamHandlers = {
   onStreamPhase?: (phase: string) => void;
-  onStreamText?: (text: string) => void;
+  onStreamText?: (text: string, isReasoning: boolean) => void;
   onThinkingTitle?: (title: string) => void;
 };
 
@@ -1354,6 +1354,7 @@ async function runAutoOpenCodePrompt(
 
   let stdoutLineBuffer = "";
   let streamedText = "";
+  let streamedReasoningText = "";
   let streamedOutputText = "";
   let streamError: string | null = null;
 
@@ -1386,10 +1387,12 @@ async function runAutoOpenCodePrompt(
 
     if (event.text) {
       streamedText = appendStreamText(streamedText, event.text);
-      if (!event.isReasoning) {
+      if (event.isReasoning) {
+        streamedReasoningText = appendStreamText(streamedReasoningText, event.text);
+      } else {
         streamedOutputText = appendStreamText(streamedOutputText, event.text);
       }
-      handlers?.onStreamText?.(event.text);
+      handlers?.onStreamText?.(event.text, event.isReasoning);
     }
 
     if (event.error && !streamError) {
@@ -1450,6 +1453,7 @@ async function runAutoOpenCodePrompt(
   }
 
   const output = nonEmptyText(streamedOutputText) ??
+    nonEmptyText(streamedReasoningText) ??
     nonEmptyText(streamedText) ??
     extractJsonLinesText(result.stdout) ??
     tryDecodeJsonMessageText(result.stdout) ??
@@ -2169,6 +2173,7 @@ async function runAutoOpenCodeProjectWorker(
         }
 
         let streamText = "";
+        let streamReasoningText = "";
         let latestStreamPhase = "executing";
         let lastStreamSentPhase: string | null = null;
         let lastStreamSentAt = 0;
@@ -2200,8 +2205,8 @@ async function runAutoOpenCodeProjectWorker(
           }
 
           if (autoProject.verbosity === "thinking") {
-            if (force && thinkingTitlesSent.size === 0 && /\S/.test(streamText)) {
-              const fallbackTitle = streamText
+            if (force && thinkingTitlesSent.size === 0 && /\S/.test(streamReasoningText)) {
+              const fallbackTitle = streamReasoningText
                 .replace(/\r\n/g, "\n")
                 .split(/\n{2,}/)[0]
                 ?.split("\n")[0]
@@ -2276,8 +2281,11 @@ async function runAutoOpenCodeProjectWorker(
                   lastStreamSentAt = now;
                 }
               },
-              onStreamText: (text: string) => {
+              onStreamText: (text: string, isReasoning: boolean) => {
                 streamText = appendStreamText(streamText, text);
+                if (isReasoning) {
+                  streamReasoningText = appendStreamText(streamReasoningText, text);
+                }
                 maybeSendStreamUpdate(false);
               },
               onThinkingTitle: (title: string) => {
