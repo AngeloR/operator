@@ -4,32 +4,28 @@
   "accessToken": "replace-me-matrix-access-token",
   "adminUserIds": ["@admin:your-server"],
   "agentApiToken": "replace-me-agent-token",
-  "autoOpenCodeProjectModelOverrides": {
-    "matrix-router": "openai/gpt-5.3-codex"
-  },
   "projects": {
     "your-project": {
-      "roomId": "!yourRoomId:your-server",
-      "prefix": "YP"
+      "roomId": "!yourRoomId:your-server"
     },
     "matrix-router": {
       "roomId": "!yourOtherRoomId:your-server",
-      "prefix": "MR",
-      "autoOpenCodeAgent": "opencode",
-      "autoOpenCodeCommand": ["opencode", "run"],
-      "autoOpenCodeCommandPrefix": "!oc",
-      "autoOpenCodeAllowedCliCommands": ["usage", "stats", "models", "model", "help"],
-      "autoOpenCodeCommandTimeoutSeconds": 30,
-      "autoOpenCodeTimeoutSeconds": 300,
-      "autoOpenCodeHeartbeatSeconds": 45,
-      "autoOpenCodeVerbosity": "output",
-      "autoOpenCodeSenderAllowlist": ["@admin:your-server"],
-      "autoOpenCodeProgressUpdates": true,
-      "autoOpenCodeStateDir": ".matrix-agent-state",
-      "autoOpenCodeCwd": "/abs/path/to/project",
-      "autoOpenCodeAckTemplate": "Received. Starting OpenCode job {{job_id}}.",
-      "autoOpenCodeProgressTemplate": "OpenCode {{phase}} (job {{job_id}}).",
-      "autoOpenCodeContextTailLines": 60
+      "agent": "opencode",
+      "model": "opencode/minimax-m2.5-free",
+      "command": ["opencode", "run"],
+      "commandPrefix": "!oc",
+      "allowedCliCommands": ["usage", "stats", "models", "model", "help"],
+      "commandTimeoutSeconds": 30,
+      "timeoutSeconds": 300,
+      "heartbeatSeconds": 45,
+      "verbosity": "output",
+      "senderAllowlist": ["@admin:your-server"],
+      "progressUpdates": true,
+      "stateDir": ".matrix-agent-state",
+      "projectWorkingDirectory": "/abs/path/to/project",
+      "ackTemplate": "Received. Starting OpenCode job {{job_id}}.",
+      "progressTemplate": "OpenCode {{phase}} (job {{job_id}}).",
+      "contextTailLines": 60
     }
   }
 }

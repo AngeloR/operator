@@ -35,6 +35,7 @@ type ProjectConfig = {
   roomId: string;
   prefix?: string;
   agent?: string;
+  model?: string;
   command?: string[];
   commandPrefix?: string;
   allowedCliCommands?: string[];
@@ -56,7 +57,6 @@ type AppConfig = {
   accessToken: string;
   port?: number;
   projects: Record<string, ProjectConfig>;
-  projectModelOverrides?: Record<string, string>;
   adminUserIds?: string[];
   agentApiToken?: string;
   agentApiTokens?: string[];
@@ -152,6 +152,7 @@ type AutoOpenCodeProject = {
   projectKey: string;
   roomId: string;
   agent: string;
+  model?: string;
   command: string[];
   commandPrefix: string;
   allowedCliCommands: Set<AutoOpenCodeCliCommand>;
@@ -293,40 +294,7 @@ function parseAgentApiTokens(appConfig: AppConfig): Set<string> {
   return new Set(tokens);
 }
 
-function parseProjectModelOverrides(
-  value: unknown,
-): Record<string, string> {
-  if (value === undefined) {
-    return {};
-  }
-
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error("projectModelOverrides must be an object mapping project keys to model IDs");
-  }
-
-  const parsed: Record<string, string> = {};
-  for (const [projectKey, rawModel] of Object.entries(value as Record<string, unknown>)) {
-    const model = nonEmptyText(rawModel);
-    if (!model) {
-      throw new Error(
-        `projectModelOverrides[${projectKey}] must be a non-empty string`,
-      );
-    }
-    parsed[projectKey] = model;
-  }
-
-  return parsed;
-}
-
-let projectModelOverrides = parseProjectModelOverrides(
-  cfg.projectModelOverrides,
-);
-
-function getProjectModelOverride(projectKey: string): string | undefined {
-  return nonEmptyText(projectModelOverrides[projectKey]) ?? undefined;
-}
-
-async function persistProjectModelOverride(
+async function persistProjectModel(
   projectKey: string,
   model: string | null,
 ): Promise<void> {
@@ -344,24 +312,24 @@ async function persistProjectModelOverride(
   }
 
   const configObject = parsedConfig as Record<string, unknown>;
-  const overrides = parseProjectModelOverrides(
-    configObject.projectModelOverrides,
-  );
+  const projects = configObject.projects;
 
-  if (model === null) {
-    delete overrides[projectKey];
-  } else {
-    overrides[projectKey] = model;
+  if (typeof projects !== "object" || projects === null || Array.isArray(projects)) {
+    throw new Error("config.json projects must be an object");
   }
 
-  if (Object.keys(overrides).length === 0) {
-    delete configObject.projectModelOverrides;
-    delete cfg.projectModelOverrides;
-    projectModelOverrides = {};
+  const project = (projects as Record<string, unknown>)[projectKey];
+
+  if (typeof project !== "object" || project === null) {
+    throw new Error(`project "${projectKey}" not found in config.json`);
+  }
+
+  const projectConfig = project as Record<string, unknown>;
+
+  if (model === null) {
+    delete projectConfig.model;
   } else {
-    configObject.projectModelOverrides = overrides;
-    cfg.projectModelOverrides = overrides;
-    projectModelOverrides = overrides;
+    projectConfig.model = model;
   }
 
   await writeFile(CONFIG_JSON_PATH, `${JSON.stringify(configObject, null, 2)}\n`, "utf8");
@@ -490,6 +458,11 @@ function parseCommandPrefix(value: unknown): string {
   }
 
   return parsed;
+}
+
+function parseModel(value: unknown): string | undefined {
+  const parsed = nonEmptyText(value);
+  return parsed ?? undefined;
 }
 
 function parseAllowedCliCommands(
@@ -671,7 +644,7 @@ function assertNoLegacyConfig(projectKey: string, project: ProjectConfig): void 
   const rawConfig = cfg as Record<string, unknown>;
   if (rawConfig[legacyModelOverrides] !== undefined) {
     throw new Error(
-      `config uses removed key "autoOpenCodeProjectModelOverrides". Rename to "projectModelOverrides".`,
+      `config uses removed key "autoOpenCodeProjectModelOverrides". Use per-project "model" field instead.`,
     );
   }
 }
@@ -819,6 +792,7 @@ function buildAutoOpenCodeMap(): Map<string, AutoOpenCodeProject> {
     const contextTailLines = parseContextTailLines(
       project.contextTailLines,
     );
+    const model = parseModel(project.model);
 
     const queue = queueKey(projectKey, "user");
     const autoProject: AutoOpenCodeProject = {
@@ -828,6 +802,7 @@ function buildAutoOpenCodeMap(): Map<string, AutoOpenCodeProject> {
         nonEmptyText(project.agent) ??
         nonEmptyText(project.prefix) ??
         "opencode",
+      model,
       command,
       commandPrefix,
       allowedCliCommands,
@@ -1766,7 +1741,7 @@ async function executeAutoOpenCodeCliCommand(
 
   if (request.command === "model") {
     const action = parseModelCommandArgs(request.args);
-    const current = getProjectModelOverride(autoProject.projectKey);
+    const current = autoProject.model;
 
     if (action.action === "show") {
       return current
@@ -1792,7 +1767,7 @@ async function executeAutoOpenCodeCliCommand(
         ].join("\n");
       }
 
-      await persistProjectModelOverride(autoProject.projectKey, null);
+      await persistProjectModel(autoProject.projectKey, null);
       return [
         `Cleared project model override for \`${autoProject.projectKey}\`.`,
         "",
@@ -1800,7 +1775,7 @@ async function executeAutoOpenCodeCliCommand(
       ].join("\n");
     }
 
-    await persistProjectModelOverride(autoProject.projectKey, action.model);
+    await persistProjectModel(autoProject.projectKey, action.model);
     return [
       `Set model override for \`${autoProject.projectKey}\` to \`${action.model}\`.`,
       "",
@@ -2005,7 +1980,7 @@ async function runAutoOpenCodePrompt(
   const prepared = prepareAutoOpenCodeCommand(
     autoProject.command,
     autoProject.verbosity,
-    getProjectModelOverride(autoProject.projectKey),
+    autoProject.model,
   );
 
   let stdoutLineBuffer = "";
@@ -2462,12 +2437,10 @@ Project-level config (all projects run the interactive agent):
   progressUpdates: true                                # default true
   stateDir: ".matrix-agent-state"                      # default
   projectWorkingDirectory: "/abs/path/to/project"      # default: current relay-core cwd
+  model: "opencode/minimax-m2.5-free"                  # optional per-project model override
   ackTemplate: "Starting OpenCode {{job_id}}."         # used when verbosity=debug
   progressTemplate: "OpenCode {{phase}} ({{job_id}})." # used for debug status updates
   contextTailLines: 60                                 # default
-
-Top-level config:
-  projectModelOverrides: { "project-key": "model-id" } # per-project model overrides
 
 Environment:
   REDIS_URL (default: redis://127.0.0.1:6379/0)
