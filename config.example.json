@@ -3,6 +3,7 @@
   "homeserverUrl": "http://your-matrix-server:8008",
   "accessToken": "replace-me-matrix-access-token",
   "adminUserIds": ["@admin:your-server"],
+  "managementRoomId": "!yourManagementRoomId:your-server",
   "agentApiToken": "replace-me-agent-token",
   "projects": {
     "your-project": {
