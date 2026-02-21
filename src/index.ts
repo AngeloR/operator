@@ -1945,6 +1945,30 @@ function managementCommandHelp(): string {
   ].join("\n");
 }
 
+function generalHelp(commandPrefix: string): string {
+  return [
+    "Available commands:",
+    "",
+    "General commands:",
+    `- !help - Show this help message`,
+    "",
+    "OpenCode CLI commands:",
+    `- ${commandPrefix} usage <model> [--days N] [--project KEY]`,
+    `- ${commandPrefix} stats [--days N] [--models [N]] [--project KEY]`,
+    `- ${commandPrefix} models [provider] [--verbose] [--refresh]`,
+    `- ${commandPrefix} model [<model-id>|reset]`,
+    `- ${commandPrefix} help`,
+    "",
+    "Project management commands (management room only):",
+    "- !project list",
+    "- !project create <name> --room <roomId> --path <directory>",
+    "- !project delete <name>",
+    "- !project show <name>",
+    "- !project reload",
+    "- !project help",
+  ].join("\n");
+}
+
 async function executeManagementCommand(
   command: ParsedManagementCommand,
   currentProjects: Record<string, ProjectConfig>,
@@ -3553,6 +3577,35 @@ async function runInboundLoop(
             if (content["m.relates_to"] !== undefined) continue;
 
             const trimmed = body.trim();
+            if (trimmed.startsWith("!help")) {
+              let response: string;
+              try {
+                response = generalHelp("!oc");
+              } catch (error: unknown) {
+                const detail = error instanceof Error ? error.message : String(error);
+                response = `Error: ${detail}`;
+              }
+
+              try {
+                await sendToRoom(
+                  roomId,
+                  buildMatrixContent({ body: response, format: "markdown" }),
+                );
+                logEvent("info", "help.command.executed", {
+                  roomId,
+                  sender,
+                });
+              } catch (error: unknown) {
+                const detail = error instanceof Error ? error.message : String(error);
+                logEvent("error", "help.command.response_failed", {
+                  roomId,
+                  sender,
+                  error: detail,
+                });
+              }
+              continue;
+            }
+
             if (!trimmed.startsWith("!project")) continue;
 
             const tokens = splitCommandTokens(trimmed.slice("!project".length).trim());
@@ -3580,6 +3633,41 @@ async function runInboundLoop(
               logEvent("error", "management.command.response_failed", {
                 roomId,
                 sender,
+                error: detail,
+              });
+            }
+            continue;
+          }
+
+          const content = event.content as Record<string, unknown>;
+          const body = nonEmptyText(content.body);
+          if (!body) continue;
+          if (content["m.relates_to"] !== undefined) continue;
+
+          const trimmed = body.trim();
+          if (trimmed.startsWith("!help")) {
+            let response: string;
+            try {
+              response = generalHelp("!oc");
+            } catch (error: unknown) {
+              const detail = error instanceof Error ? error.message : String(error);
+              response = `Error: ${detail}`;
+            }
+
+            try {
+              await sendToRoom(
+                roomId,
+                buildMatrixContent({ body: response, format: "markdown" }),
+              );
+              logEvent("info", "help.command.executed", {
+                roomId,
+                projectKey: projectKey ?? null,
+              });
+            } catch (error: unknown) {
+              const detail = error instanceof Error ? error.message : String(error);
+              logEvent("error", "help.command.response_failed", {
+                roomId,
+                projectKey: projectKey ?? null,
                 error: detail,
               });
             }
