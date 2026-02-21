@@ -58,6 +58,7 @@ type AppConfig = {
   port?: number;
   projects: Record<string, ProjectConfig>;
   adminUserIds?: string[];
+  managementRoomId?: string;
   agentApiToken?: string;
   agentApiTokens?: string[];
   redisUrl?: string;
@@ -208,7 +209,7 @@ type ParsedAutoOpenCodeCliRequest = {
 };
 
 const cfg = config as AppConfig;
-const projects = cfg.projects ?? {};
+let projects = cfg.projects ?? {};
 const CONFIG_JSON_PATH = fileURLToPath(new URL("../config.json", import.meta.url));
 const SYNC_TOKEN_KEY = "matrix-agent:sync:next-batch:v1";
 const DEFAULT_AUTO_OPENCODE_COMMAND = ["opencode", "run"];
@@ -333,6 +334,86 @@ async function persistProjectModel(
   }
 
   await writeFile(CONFIG_JSON_PATH, `${JSON.stringify(configObject, null, 2)}\n`, "utf8");
+}
+
+async function persistProjectConfig(
+  projectKey: string,
+  projectConfig: ProjectConfig | null,
+): Promise<void> {
+  const rawConfig = await readFile(CONFIG_JSON_PATH, "utf8");
+
+  let parsedConfig: unknown;
+  try {
+    parsedConfig = JSON.parse(rawConfig) as unknown;
+  } catch {
+    throw new Error("config.json is not valid JSON");
+  }
+
+  if (typeof parsedConfig !== "object" || parsedConfig === null || Array.isArray(parsedConfig)) {
+    throw new Error("config.json root must be a JSON object");
+  }
+
+  const configObject = parsedConfig as Record<string, unknown>;
+  const projects = configObject.projects;
+
+  if (typeof projects !== "object" || projects === null || Array.isArray(projects)) {
+    throw new Error("config.json projects must be an object");
+  }
+
+  const projectsObj = projects as Record<string, unknown>;
+
+  if (projectConfig === null) {
+    if (!projectsObj[projectKey]) {
+      throw new Error(`project "${projectKey}" not found in config.json`);
+    }
+    delete projectsObj[projectKey];
+  } else {
+    projectsObj[projectKey] = projectConfig;
+  }
+
+  await writeFile(CONFIG_JSON_PATH, `${JSON.stringify(configObject, null, 2)}\n`, "utf8");
+}
+
+async function loadConfig(): Promise<void> {
+  const rawConfig = await readFile(CONFIG_JSON_PATH, "utf8");
+
+  let parsedConfig: unknown;
+  try {
+    parsedConfig = JSON.parse(rawConfig) as unknown;
+  } catch {
+    throw new Error("config.json is not valid JSON");
+  }
+
+  if (typeof parsedConfig !== "object" || parsedConfig === null || Array.isArray(parsedConfig)) {
+    throw new Error("config.json root must be a JSON object");
+  }
+
+  const configObject = parsedConfig as Record<string, unknown>;
+
+  if (!configObject.homeserverUrl || !configObject.accessToken) {
+    throw new Error("config.json must include homeserverUrl and accessToken");
+  }
+
+  const projectsObj = configObject.projects;
+  if (typeof projectsObj !== "object" || projectsObj === null || Array.isArray(projectsObj)) {
+    throw new Error("config.json projects must be an object");
+  }
+
+  cfg.homeserverUrl = configObject.homeserverUrl as string;
+  cfg.accessToken = configObject.accessToken as string;
+  cfg.port = configObject.port as number | undefined;
+  cfg.projects = projectsObj as Record<string, ProjectConfig>;
+  cfg.adminUserIds = configObject.adminUserIds as string[] | undefined;
+  cfg.managementRoomId = configObject.managementRoomId as string | undefined;
+  cfg.agentApiToken = configObject.agentApiToken as string | undefined;
+  cfg.agentApiTokens = configObject.agentApiTokens as string[] | undefined;
+  cfg.redisUrl = configObject.redisUrl as string | undefined;
+  cfg.redisHost = configObject.redisHost as string | undefined;
+  cfg.redisPort = configObject.redisPort as number | undefined;
+  cfg.redisPassword = configObject.redisPassword as string | undefined;
+  cfg.redisDb = configObject.redisDb as number | undefined;
+
+  projects = cfg.projects ?? {};
 }
 
 function toPlainHtml(text: string): string {
@@ -1725,6 +1806,244 @@ function autoOpenCodeCliHelp(prefix: string): string {
   ].join("\n");
 }
 
+type ParsedManagementCommand =
+  | { action: "list" }
+  | { action: "create"; projectKey: string; roomId: string; projectWorkingDirectory: string }
+  | { action: "delete"; projectKey: string }
+  | { action: "show"; projectKey: string }
+  | { action: "reload" }
+  | { action: "help" };
+
+function parseManagementCommandArgs(args: string[]): ParsedManagementCommand {
+  const command = args[0]?.toLowerCase();
+
+  if (!command || command === "help") {
+    return { action: "help" };
+  }
+
+  if (command === "list") {
+    return { action: "list" };
+  }
+
+  if (command === "reload") {
+    return { action: "reload" };
+  }
+
+  if (command === "show") {
+    const projectKey = nonEmptyText(args[1]);
+    if (!projectKey) {
+      throw new Error("project show requires a project name");
+    }
+    return { action: "show", projectKey };
+  }
+
+  if (command === "create") {
+    const projectKey = nonEmptyText(args[1]);
+    if (!projectKey) {
+      throw new Error("project create requires a project name");
+    }
+
+    let roomId: string | undefined;
+    let projectWorkingDirectory: string | undefined;
+
+    for (let i = 2; i < args.length; i += 1) {
+      const token = args[i];
+      if (!token) continue;
+
+      if (token === "--room" || token === "-r") {
+        const parsed = nonEmptyText(args[i + 1]);
+        roomId = parsed === null ? undefined : parsed;
+        if (!roomId) {
+          throw new Error("--room requires a room ID value");
+        }
+        i += 1;
+        continue;
+      }
+
+      if (token.startsWith("--room=") || token.startsWith("-r=")) {
+        const value = token.includes("=") ? token.split("=")[1] : undefined;
+        const parsed = nonEmptyText(value ?? args[i + 1]);
+        roomId = parsed === null ? undefined : parsed;
+        if (!roomId) {
+          throw new Error("--room requires a room ID value");
+        }
+        if (!token.includes("=")) {
+          i += 1;
+        }
+        continue;
+      }
+
+      if (token === "--path" || token === "-p") {
+        const parsed = nonEmptyText(args[i + 1]);
+        projectWorkingDirectory = parsed === null ? undefined : parsed;
+        if (!projectWorkingDirectory) {
+          throw new Error("--path requires a directory path value");
+        }
+        i += 1;
+        continue;
+      }
+
+      if (token.startsWith("--path=") || token.startsWith("-p=")) {
+        const value = token.includes("=") ? token.split("=")[1] : undefined;
+        const parsed = nonEmptyText(value ?? args[i + 1]);
+        projectWorkingDirectory = parsed === null ? undefined : parsed;
+        if (!projectWorkingDirectory) {
+          throw new Error("--path requires a directory path value");
+        }
+        if (!token.includes("=")) {
+          i += 1;
+        }
+        continue;
+      }
+
+      throw new Error(`unknown option: ${token}`);
+    }
+
+    if (!roomId) {
+      throw new Error("project create requires --room <roomId>");
+    }
+
+    if (!projectWorkingDirectory) {
+      throw new Error("project create requires --path <directory>");
+    }
+
+    return { action: "create", projectKey, roomId, projectWorkingDirectory };
+  }
+
+  if (command === "delete") {
+    const projectKey = nonEmptyText(args[1]);
+    if (!projectKey) {
+      throw new Error("project delete requires a project name");
+    }
+    return { action: "delete", projectKey };
+  }
+
+  throw new Error(`unknown project command: ${command}`);
+}
+
+function managementCommandHelp(): string {
+  return [
+    "Project management commands:",
+    "",
+    "- !project list",
+    "  Show all configured projects",
+    "",
+    "- !project create <name> --room <roomId> --path <directory>",
+    "  Create a new project",
+    "",
+    "- !project delete <name>",
+    "  Delete a project (use with caution)",
+    "",
+    "- !project show <name>",
+    "  Display project configuration",
+    "",
+    "- !project reload",
+    "  Hot-reload config from disk",
+    "",
+    "- !project help",
+    "  Show this help message",
+  ].join("\n");
+}
+
+async function executeManagementCommand(
+  command: ParsedManagementCommand,
+  currentProjects: Record<string, ProjectConfig>,
+): Promise<string> {
+  if (command.action === "help") {
+    return managementCommandHelp();
+  }
+
+  if (command.action === "list") {
+    if (Object.keys(currentProjects).length === 0) {
+      return "No projects configured.";
+    }
+
+    const lines: string[] = ["Configured projects:", ""];
+    for (const [key, project] of Object.entries(currentProjects)) {
+      lines.push(`- ${key}: ${project.roomId}`);
+      if (project.projectWorkingDirectory) {
+        lines.push(`  working directory: ${project.projectWorkingDirectory}`);
+      }
+    }
+    return lines.join("\n");
+  }
+
+  if (command.action === "show") {
+    const project = currentProjects[command.projectKey];
+    if (!project) {
+      return `Project "${command.projectKey}" not found.`;
+    }
+
+    return [
+      `Project: ${command.projectKey}`,
+      "",
+      "```json",
+      JSON.stringify(project, null, 2),
+      "```",
+    ].join("\n");
+  }
+
+  if (command.action === "reload") {
+    await loadConfig();
+    const projectCount = Object.keys(projects).length;
+    return [
+      `Config hot-reloaded successfully.`,
+      "",
+      `Loaded ${projectCount} project(s).`,
+    ].join("\n");
+  }
+
+  if (command.action === "create") {
+    if (currentProjects[command.projectKey]) {
+      return `Project "${command.projectKey}" already exists. Use !project delete first to remove it.`;
+    }
+
+    const newProject: ProjectConfig = {
+      roomId: command.roomId,
+      projectWorkingDirectory: command.projectWorkingDirectory,
+      senderAllowlist: [],
+      command: ["opencode", "run", "--format", "json"],
+      timeoutSeconds: 3600,
+      verbosity: "thinking",
+      progressUpdates: true,
+      stateDir: ".matrix-agent-state",
+      ackTemplate: "Received. Starting OpenCode job {{job_id}}.",
+      progressTemplate: "OpenCode {{phase}} (job {{job_id}}).",
+      contextTailLines: 60,
+    };
+
+    await persistProjectConfig(command.projectKey, newProject);
+    await loadConfig();
+
+    return [
+      `Created project "${command.projectKey}".`,
+      "",
+      "```json",
+      JSON.stringify(newProject, null, 2),
+      "```",
+      "",
+      "Config hot-reloaded successfully.",
+    ].join("\n");
+  }
+
+  if (command.action === "delete") {
+    if (!currentProjects[command.projectKey]) {
+      return `Project "${command.projectKey}" not found.`;
+    }
+
+    await persistProjectConfig(command.projectKey, null);
+    await loadConfig();
+
+    return [
+      `Deleted project "${command.projectKey}".`,
+      "",
+      "Config hot-reloaded successfully.",
+    ].join("\n");
+  }
+
+  return "Unknown command.";
+}
+
 async function executeAutoOpenCodeCliCommand(
   request: ParsedAutoOpenCodeCliRequest,
   autoProject: AutoOpenCodeProject,
@@ -1768,18 +2087,24 @@ async function executeAutoOpenCodeCliCommand(
       }
 
       await persistProjectModel(autoProject.projectKey, null);
+      await loadConfig();
       return [
         `Cleared project model override for \`${autoProject.projectKey}\`.`,
         "",
         "OpenCode will now use its configured default model.",
+        "",
+        "Config hot-reloaded successfully.",
       ].join("\n");
     }
 
     await persistProjectModel(autoProject.projectKey, action.model);
+    await loadConfig();
     return [
       `Set model override for \`${autoProject.projectKey}\` to \`${action.model}\`.`,
       "",
       "New OpenCode runs in this project will use that model.",
+      "",
+      "Config hot-reloaded successfully.",
     ].join("\n");
   }
 
@@ -3123,6 +3448,7 @@ async function runInboundLoop(
   roomToProject: Map<string, string>,
   adminUserIds: Set<string>,
   botUserId?: string,
+  managementRoomId?: string,
 ): Promise<never> {
   let since = nonEmptyText(await inboundRedis.get(SYNC_TOKEN_KEY)) ?? undefined;
 
@@ -3164,33 +3490,47 @@ async function runInboundLoop(
       const invitedRooms = syncResponse.rooms?.invite ?? {};
       for (const roomId of Object.keys(invitedRooms)) {
         const projectKey = roomToProject.get(roomId);
-        if (!projectKey) {
-          continue;
-        }
+        const isManagementRoom = managementRoomId && roomId === managementRoomId;
 
         try {
           const joinedRoomId = await joinMatrixRoom(roomId);
-          logEvent("info", "inbound.room.auto_joined", {
-            projectKey,
-            roomId: joinedRoomId ?? roomId,
-          });
+          if (projectKey) {
+            logEvent("info", "inbound.room.auto_joined", {
+              projectKey,
+              roomId: joinedRoomId ?? roomId,
+            });
+          } else if (isManagementRoom) {
+            logEvent("info", "inbound.room.management_joined", {
+              roomId: joinedRoomId ?? roomId,
+            });
+          } else {
+            logEvent("info", "inbound.room.unconfigured_joined", {
+              roomId: joinedRoomId ?? roomId,
+            });
+          }
         } catch (error: unknown) {
           const detail = error instanceof Error ? error.message : String(error);
-          recordFailure("inbound_auto_join", projectKey);
-          logEvent("error", "inbound.room.auto_join_failed", {
-            projectKey,
-            error: detail,
-            roomId,
-          });
+          if (projectKey) {
+            recordFailure("inbound_auto_join", projectKey);
+            logEvent("error", "inbound.room.auto_join_failed", {
+              projectKey,
+              error: detail,
+              roomId,
+            });
+          } else {
+            logEvent("error", "inbound.room.unconfigured_join_failed", {
+              error: detail,
+              roomId,
+            });
+          }
         }
       }
 
       const joinedRooms = syncResponse.rooms?.join ?? {};
       for (const [roomId, roomState] of Object.entries(joinedRooms)) {
         const projectKey = roomToProject.get(roomId);
-        if (!projectKey) {
-          continue;
-        }
+
+        const isManagementRoom = managementRoomId && roomId === managementRoomId;
 
         const events = roomState.timeline?.events;
         if (!Array.isArray(events)) {
@@ -3199,6 +3539,83 @@ async function runInboundLoop(
 
         for (const rawEvent of events) {
           const event = rawEvent as MatrixTimelineEvent;
+
+          if (isManagementRoom) {
+            const sender = nonEmptyText(event.sender);
+            if (!sender) continue;
+            if (botUserId && sender === botUserId) continue;
+            if (adminUserIds.size > 0 && !adminUserIds.has(sender)) continue;
+
+            if (typeof event.content !== "object" || event.content === null) continue;
+            const content = event.content as Record<string, unknown>;
+            const body = nonEmptyText(content.body);
+            if (!body) continue;
+            if (content["m.relates_to"] !== undefined) continue;
+
+            const trimmed = body.trim();
+            if (!trimmed.startsWith("!project")) continue;
+
+            const tokens = splitCommandTokens(trimmed.slice("!project".length).trim());
+            let response: string;
+            try {
+              const parsed = parseManagementCommandArgs(tokens);
+              response = await executeManagementCommand(parsed, projects);
+            } catch (error: unknown) {
+              const detail = error instanceof Error ? error.message : String(error);
+              response = `Error: ${detail}`;
+            }
+
+            try {
+              await sendToRoom(
+                roomId,
+                buildMatrixContent({ body: response, format: "markdown" }),
+              );
+              logEvent("info", "management.command.executed", {
+                roomId,
+                sender,
+                command: tokens[0] ?? "unknown",
+              });
+            } catch (error: unknown) {
+              const detail = error instanceof Error ? error.message : String(error);
+              logEvent("error", "management.command.response_failed", {
+                roomId,
+                sender,
+                error: detail,
+              });
+            }
+            continue;
+          }
+
+          if (!projectKey) {
+            const sender = nonEmptyText(event.sender);
+            if (!sender) continue;
+            if (botUserId && sender === botUserId) continue;
+
+            const content = event.content as Record<string, unknown>;
+            const body = nonEmptyText(content.body);
+            if (!body) continue;
+            if (content["m.relates_to"] !== undefined) continue;
+
+            try {
+              await sendToRoom(
+                roomId,
+                buildMatrixContent({ body: "There is no project configured for this channel. Please configure a project using the management room.", format: "plain" }),
+              );
+              logEvent("info", "inbound.room.unconfigured_message_response", {
+                roomId,
+                sender,
+              });
+            } catch (error: unknown) {
+              const detail = error instanceof Error ? error.message : String(error);
+              logEvent("error", "inbound.room.unconfigured_message_failed", {
+                roomId,
+                sender,
+                error: detail,
+              });
+            }
+            continue;
+          }
+
           const envelope = toUserQueueEnvelope(
             event,
             projectKey,
@@ -3343,7 +3760,13 @@ async function commandDaemon(redisConfig: RedisConfig): Promise<void> {
     });
   });
 
-  runInboundLoop(inboundRedis, roomToProject, adminUserIds, botUserId).catch(
+  runInboundLoop(
+    inboundRedis,
+    roomToProject,
+    adminUserIds,
+    botUserId,
+    cfg.managementRoomId,
+  ).catch(
     (error: unknown) => {
       const detail = error instanceof Error ? error.message : String(error);
       recordFailure("inbound_loop_fatal");
