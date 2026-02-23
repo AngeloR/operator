@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "matrix-agent",
+      "name": "operator",
       "dependencies": {
         "marked": "^17.0.3",
       },

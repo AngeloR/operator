@@ -24,6 +24,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 login.json
 config.json
 agent-runtime.json
+.operator-state/
 .matrix-agent-state/
 
 # caches
