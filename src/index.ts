@@ -22,6 +22,7 @@ import {
   parseOpenCodeStreamEvent,
   tryDecodeJsonMessageText,
 } from "./opencode-stream";
+import { buildInitialSenderAllowlist, parseSenderAllowlist } from "./sender-allowlist";
 import {
   buildMetricsSnapshot,
   collectQueueDepth,
@@ -699,22 +700,6 @@ function parseContextTailLines(value: unknown): number {
   }
 
   return n;
-}
-
-function parseSenderAllowlist(value: unknown): Set<string> {
-  if (!Array.isArray(value)) {
-    throw new Error("senderAllowlist must be an array of user IDs");
-  }
-
-  const ids = value
-    .map((item) => (typeof item === "string" ? item.trim() : ""))
-    .filter((item) => item.length > 0);
-
-  if (ids.length === 0) {
-    throw new Error("senderAllowlist must include at least one user ID");
-  }
-
-  return new Set(ids);
 }
 
 function assertNoLegacyConfig(projectKey: string, project: ProjectConfig): void {
@@ -2098,6 +2083,7 @@ function generalHelp(commandPrefix: string): string {
 async function executeManagementCommand(
   command: ParsedManagementCommand,
   currentProjects: Record<string, ProjectConfig>,
+  senderUserId: string,
 ): Promise<string> {
   if (command.action === "help") {
     return managementCommandHelp();
@@ -2151,7 +2137,7 @@ async function executeManagementCommand(
     const newProject: ProjectConfig = {
       roomId: command.roomId,
       projectWorkingDirectory: command.projectWorkingDirectory,
-      senderAllowlist: [],
+      senderAllowlist: buildInitialSenderAllowlist(senderUserId),
       command: ["opencode", "run", "--format", "json"],
       timeoutSeconds: 3600,
       verbosity: "thinking",
@@ -2171,6 +2157,8 @@ async function executeManagementCommand(
       "```json",
       JSON.stringify(newProject, null, 2),
       "```",
+      "",
+      `Added ${senderUserId} to senderAllowlist by default.`,
       "",
       "Config hot-reloaded successfully.",
     ].join("\n");
@@ -3800,7 +3788,7 @@ async function runInboundLoop(
             let response: string;
             try {
               const parsed = parseManagementCommandArgs(tokens);
-              response = await executeManagementCommand(parsed, projects);
+              response = await executeManagementCommand(parsed, projects, sender);
             } catch (error: unknown) {
               const detail = error instanceof Error ? error.message : String(error);
               response = `Error: ${detail}`;

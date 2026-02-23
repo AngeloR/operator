@@ -123,6 +123,9 @@ Examples:
 !op reload
 ```
 
+When using `!op create`, the sender who runs the command is automatically added to
+that project's `senderAllowlist`.
+
 ## HTTP API
 
 The relay exposes an HTTP API for external agents:
@@ -180,7 +183,7 @@ curl http://localhost:8888/v1/metrics
 | `command`                | No       | Command to run (default: `["opencode", "run"]`)                 |
 | `commandPrefix`          | No       | In-room command prefix (default: `!op`)                         |
 | `projectWorkingDirectory`| Yes      | Working directory for OpenCode                                  |
-| `senderAllowlist`        | Yes      | Allowed senders                                                 |
+| `senderAllowlist`        | Yes      | Allowed senders (auto-seeded for `!op create` projects)        |
 | `timeoutSeconds`         | No       | Timeout for OpenCode runs (default: 300, 0=disable)             |
 | `verbosity`              | No       | Output mode: `output`, `debug`, `thinking`, `thinking-complete` |
 
