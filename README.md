@@ -19,9 +19,7 @@ flowchart LR
     B -->|queue| C[Redis Queue]
     B -->|spawn| D[OpenCode]
     
-    C -->|poll| E[External Agents]
-    E -->|send| C
-    E -.->|invoke| D
+    D -->|invoke| E[External Agents]
 ```
 
 1. **Matrix Ingress**: Messages from configured rooms are queued to Redis (`[project]:user`)
