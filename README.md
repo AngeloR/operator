@@ -21,6 +21,7 @@ flowchart LR
     
     C -->|poll| E[External Agents]
     E -->|send| C
+    E -.->|invoke| D
 ```
 
 1. **Matrix Ingress**: Messages from configured rooms are queued to Redis (`[project]:user`)
