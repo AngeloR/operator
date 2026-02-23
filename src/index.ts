@@ -211,9 +211,11 @@ type ParsedAutoOpenCodeCliRequest = {
 const cfg = config as AppConfig;
 let projects = cfg.projects ?? {};
 const CONFIG_JSON_PATH = fileURLToPath(new URL("../config.json", import.meta.url));
-const SYNC_TOKEN_KEY = "matrix-agent:sync:next-batch:v1";
+const SYNC_TOKEN_KEY = "operator:sync:next-batch:v1";
+const LEGACY_SYNC_TOKEN_KEY = "matrix-agent:sync:next-batch:v1";
 const DEFAULT_AUTO_OPENCODE_COMMAND = ["opencode", "run"];
-const DEFAULT_AUTO_OPENCODE_COMMAND_PREFIX = "!oc";
+const DEFAULT_AUTO_OPENCODE_COMMAND_PREFIX = "!op";
+const MANAGEMENT_COMMAND_PREFIX = "!op";
 const DEFAULT_AUTO_OPENCODE_ALLOWED_CLI_COMMANDS = ["usage", "stats", "models", "model", "help"];
 const DEFAULT_AUTO_OPENCODE_COMMAND_TIMEOUT_SECONDS = 30;
 const DEFAULT_AUTO_OPENCODE_TIMEOUT_SECONDS = 300;
@@ -221,7 +223,8 @@ const DEFAULT_AUTO_OPENCODE_HEARTBEAT_SECONDS = 45;
 const AUTO_OPENCODE_INFINITE_TIMEOUT_HEARTBEAT_MS = 15 * 60 * 1000;
 const DEFAULT_AUTO_OPENCODE_VERBOSITY: AutoOpenCodeVerbosity = "output";
 const DEFAULT_AUTO_OPENCODE_PROGRESS_UPDATES = true;
-const DEFAULT_AUTO_OPENCODE_STATE_DIR = ".matrix-agent-state";
+const DEFAULT_AUTO_OPENCODE_STATE_DIR = ".operator-state";
+const LEGACY_AUTO_OPENCODE_STATE_DIR = ".matrix-agent-state";
 const DEFAULT_AUTO_OPENCODE_ACK_TEMPLATE =
   "Received your message. Starting OpenCode job {{job_id}}.";
 const DEFAULT_AUTO_OPENCODE_PROGRESS_TEMPLATE = "OpenCode {{phase}} (job {{job_id}}).";
@@ -851,11 +854,15 @@ function buildAutoOpenCodeMap(): Map<string, AutoOpenCodeProject> {
       DEFAULT_AUTO_OPENCODE_PROGRESS_UPDATES,
       "progressUpdates",
     );
-    const stateDir = parseString(
+    const parsedStateDir = parseString(
       project.stateDir,
       DEFAULT_AUTO_OPENCODE_STATE_DIR,
       "stateDir",
     );
+    const stateDir =
+      parsedStateDir === LEGACY_AUTO_OPENCODE_STATE_DIR
+        ? DEFAULT_AUTO_OPENCODE_STATE_DIR
+        : parsedStateDir;
     const cwd = parseProjectWorkingDirectory(project.projectWorkingDirectory);
     const senderAllowlist = parseSenderAllowlist(
       project.senderAllowlist,
@@ -1589,7 +1596,7 @@ function parsePositiveInteger(value: string, fieldName: string): number {
 function parseUsageCommandArgs(args: string[]): { model: string; days?: number; project?: string } {
   const model = nonEmptyText(args[0]);
   if (!model) {
-    throw new Error("usage command requires a model (example: !oc usage openai/gpt-5.3-codex --days 30)");
+    throw new Error("usage command requires a model (example: !op usage openai/gpt-5.3-codex --days 30)");
   }
 
   let days: number | undefined;
@@ -1924,24 +1931,31 @@ function parseManagementCommandArgs(args: string[]): ParsedManagementCommand {
 function managementCommandHelp(): string {
   return [
     "Project management commands:",
+    "(run these in the management room)",
     "",
-    "- !project list",
+    `- ${MANAGEMENT_COMMAND_PREFIX} list`,
     "  Show all configured projects",
+    `  Example: ${MANAGEMENT_COMMAND_PREFIX} list`,
     "",
-    "- !project create <name> --room <roomId> --path <directory>",
+    `- ${MANAGEMENT_COMMAND_PREFIX} create <name> --room <roomId> --path <directory>`,
     "  Create a new project",
+    `  Example: ${MANAGEMENT_COMMAND_PREFIX} create operator --room !QefzZvtgPwIGrHuOuo:palantir --path /home/xangelo/repos/operator`,
     "",
-    "- !project delete <name>",
+    `- ${MANAGEMENT_COMMAND_PREFIX} delete <name>`,
     "  Delete a project (use with caution)",
+    `  Example: ${MANAGEMENT_COMMAND_PREFIX} delete operator`,
     "",
-    "- !project show <name>",
+    `- ${MANAGEMENT_COMMAND_PREFIX} show <name>`,
     "  Display project configuration",
+    `  Example: ${MANAGEMENT_COMMAND_PREFIX} show operator`,
     "",
-    "- !project reload",
+    `- ${MANAGEMENT_COMMAND_PREFIX} reload`,
     "  Hot-reload config from disk",
+    `  Example: ${MANAGEMENT_COMMAND_PREFIX} reload`,
     "",
-    "- !project help",
+    `- ${MANAGEMENT_COMMAND_PREFIX} help`,
     "  Show this help message",
+    `  Example: ${MANAGEMENT_COMMAND_PREFIX} help`,
   ].join("\n");
 }
 
@@ -1960,12 +1974,14 @@ function generalHelp(commandPrefix: string): string {
     `- ${commandPrefix} help`,
     "",
     "Project management commands (management room only):",
-    "- !project list",
-    "- !project create <name> --room <roomId> --path <directory>",
-    "- !project delete <name>",
-    "- !project show <name>",
-    "- !project reload",
-    "- !project help",
+    `- ${MANAGEMENT_COMMAND_PREFIX} list`,
+    `- ${MANAGEMENT_COMMAND_PREFIX} create <name> --room <roomId> --path <directory>`,
+    `- ${MANAGEMENT_COMMAND_PREFIX} delete <name>`,
+    `- ${MANAGEMENT_COMMAND_PREFIX} show <name>`,
+    `- ${MANAGEMENT_COMMAND_PREFIX} reload`,
+    `- ${MANAGEMENT_COMMAND_PREFIX} help`,
+    "",
+    `Tip: run ${MANAGEMENT_COMMAND_PREFIX} help in the management room for command examples.`,
   ].join("\n");
 }
 
@@ -2019,7 +2035,7 @@ async function executeManagementCommand(
 
   if (command.action === "create") {
     if (currentProjects[command.projectKey]) {
-      return `Project "${command.projectKey}" already exists. Use !project delete first to remove it.`;
+      return `Project "${command.projectKey}" already exists. Use ${MANAGEMENT_COMMAND_PREFIX} delete first to remove it.`;
     }
 
     const newProject: ProjectConfig = {
@@ -2030,7 +2046,7 @@ async function executeManagementCommand(
       timeoutSeconds: 3600,
       verbosity: "thinking",
       progressUpdates: true,
-      stateDir: ".matrix-agent-state",
+      stateDir: ".operator-state",
       ackTemplate: "Received. Starting OpenCode job {{job_id}}.",
       progressTemplate: "OpenCode {{phase}} (job {{job_id}}).",
       contextTailLines: 60,
@@ -2776,7 +2792,7 @@ Auth for /v1/agent/*:
 Project-level config (all projects run the interactive agent):
   agent: "opencode"                                    # optional internal agent label (state/context)
   command: ["opencode","run"]                          # relay enforces JSON stream mode and requires opencode run
-  commandPrefix: "!oc"                                 # in-room command prefix for opencode CLI shortcuts
+  commandPrefix: "!op"                                 # in-room command prefix for opencode CLI shortcuts
   allowedCliCommands: ["usage","stats","models","model","help"] # command allowlist
   commandTimeoutSeconds: 30                            # timeout for prefixed in-room opencode commands
   timeoutSeconds: 300                                  # timeout per message (0 disables timeout + forces 15m heartbeat)
@@ -2784,7 +2800,7 @@ Project-level config (all projects run the interactive agent):
   verbosity: "output"                                  # output|thinking|thinking-complete|debug
   senderAllowlist: ["@admin:your-server"]              # required
   progressUpdates: true                                # default true
-  stateDir: ".matrix-agent-state"                      # default
+  stateDir: ".operator-state"                          # default
   projectWorkingDirectory: "/abs/path/to/project"      # default: current relay-core cwd
   model: "opencode/minimax-m2.5-free"                  # optional per-project model override
   ackTemplate: "Starting OpenCode {{job_id}}."         # used when verbosity=debug
@@ -3477,6 +3493,20 @@ async function runInboundLoop(
   let since = nonEmptyText(await inboundRedis.get(SYNC_TOKEN_KEY)) ?? undefined;
 
   if (!since) {
+    const legacySince =
+      nonEmptyText(await inboundRedis.get(LEGACY_SYNC_TOKEN_KEY)) ?? undefined;
+    if (legacySince) {
+      since = legacySince;
+      await inboundRedis.set(SYNC_TOKEN_KEY, legacySince);
+      await inboundRedis.del(LEGACY_SYNC_TOKEN_KEY);
+      logEvent("info", "inbound.sync.token_key.migrated", {
+        from: LEGACY_SYNC_TOKEN_KEY,
+        to: SYNC_TOKEN_KEY,
+      });
+    }
+  }
+
+  if (!since) {
     try {
       const syncStartedAt = Date.now();
       const bootstrap = await syncMatrix(undefined, 0);
@@ -3580,7 +3610,7 @@ async function runInboundLoop(
             if (trimmed.startsWith("!help")) {
               let response: string;
               try {
-                response = generalHelp("!oc");
+                response = generalHelp(DEFAULT_AUTO_OPENCODE_COMMAND_PREFIX);
               } catch (error: unknown) {
                 const detail = error instanceof Error ? error.message : String(error);
                 response = `Error: ${detail}`;
@@ -3606,9 +3636,11 @@ async function runInboundLoop(
               continue;
             }
 
-            if (!trimmed.startsWith("!project")) continue;
+            if (!trimmed.startsWith(MANAGEMENT_COMMAND_PREFIX)) continue;
+            const nextChar = trimmed.charAt(MANAGEMENT_COMMAND_PREFIX.length);
+            if (nextChar && !/\s/.test(nextChar)) continue;
 
-            const tokens = splitCommandTokens(trimmed.slice("!project".length).trim());
+            const tokens = splitCommandTokens(trimmed.slice(MANAGEMENT_COMMAND_PREFIX.length).trim());
             let response: string;
             try {
               const parsed = parseManagementCommandArgs(tokens);
@@ -3648,7 +3680,7 @@ async function runInboundLoop(
           if (trimmed.startsWith("!help")) {
             let response: string;
             try {
-              response = generalHelp("!oc");
+              response = generalHelp(DEFAULT_AUTO_OPENCODE_COMMAND_PREFIX);
             } catch (error: unknown) {
               const detail = error instanceof Error ? error.message : String(error);
               response = `Error: ${detail}`;

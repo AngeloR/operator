@@ -1,10 +1,10 @@
-# matrix-agent
+# operator
 
 A Matrix-to-OpenCode bridge that lets you interact with OpenCode (AI coding assistant) directly from Matrix chat rooms.
 
 ## What It Is
 
-`matrix-agent` is a relay service that:
+`operator` is a relay service that:
 
 - Connects to your Matrix homeserver and monitors configured rooms for messages
 - Optionally runs OpenCode to respond to messages automatically using AI
@@ -15,7 +15,7 @@ A Matrix-to-OpenCode bridge that lets you interact with OpenCode (AI coding assi
 
 ```mermaid
 flowchart LR
-    A[Matrix Room] -->|messages| B[matrix-agent<br/>relay-core]
+    A[Matrix Room] -->|messages| B[operator<br/>relay-core]
     B -->|queue| C[Redis Queue]
     B -->|spawn| D[OpenCode]
     
@@ -84,19 +84,41 @@ You can use these commands directly in Matrix rooms:
 
 | Command                           | Description                                  |
 | --------------------------------- | -------------------------------------------- |
-| `!oc usage <model> [--days N]`    | Show usage stats for a specific model        |
-| `!oc stats [--days N] [--models]` | Show overall usage statistics                |
-| `!oc models [--verbose]`          | List available models                        |
-| `!oc model`                       | Show current model override for this project |
-| `!oc model <model-id>`            | Set a model override for this project        |
-| `!oc model reset`                 | Clear model override (use OpenCode default)  |
-| `!oc help`                        | Show command help                            |
+| `!op usage <model> [--days N]`    | Show usage stats for a specific model        |
+| `!op stats [--days N] [--models]` | Show overall usage statistics                |
+| `!op models [--verbose]`          | List available models                        |
+| `!op model`                       | Show current model override for this project |
+| `!op model <model-id>`            | Set a model override for this project        |
+| `!op model reset`                 | Clear model override (use OpenCode default)  |
+| `!op help`                        | Show command help                            |
 
 Example:
 
 ```
-!oc usage openai/gpt-5.3-codex --days 30
-!oc model openai/gpt-4-turbo
+!op usage openai/gpt-5.3-codex --days 30
+!op model openai/gpt-4-turbo
+```
+
+### Project Management Commands (Management Room Only)
+
+Use these commands in your configured management room to add/remove/list projects.
+
+| Command                                                   | Description                      |
+| --------------------------------------------------------- | -------------------------------- |
+| `!op list`                                                | Show all configured projects     |
+| `!op create <name> --room <roomId> --path <dir>`         | Create a new project             |
+| `!op delete <name>`                                       | Delete a project                 |
+| `!op show <name>`                                         | Show one project configuration   |
+| `!op reload`                                              | Reload `config.json` from disk   |
+| `!op help`                                                | Show management command help     |
+
+Examples:
+
+```text
+!op list
+!op create operator --room !QefzZvtgPwIGrHuOuo:palantir --path /home/xangelo/repos/operator
+!op show operator
+!op reload
 ```
 
 ## HTTP API
@@ -154,7 +176,7 @@ curl http://localhost:8888/v1/metrics
 | `prefix`                 | No       | Legacy prefix for message routing                               |
 | `agent`                  | No       | Agent label (default: `opencode`)                               |
 | `command`                | No       | Command to run (default: `["opencode", "run"]`)                 |
-| `commandPrefix`          | No       | In-room command prefix (default: `!oc`)                         |
+| `commandPrefix`          | No       | In-room command prefix (default: `!op`)                         |
 | `projectWorkingDirectory`| Yes      | Working directory for OpenCode                                  |
 | `senderAllowlist`        | Yes      | Allowed senders                                                 |
 | `timeoutSeconds`         | No       | Timeout for OpenCode runs (default: 300, 0=disable)             |
@@ -182,7 +204,7 @@ bun run src/index.ts poll-user my-project --block 30
 
 ## Architecture Notes
 
-- **Sync State**: Matrix sync position stored at Redis key `matrix-agent:sync:next-batch:v1`
+- **Sync State**: Matrix sync position stored at Redis key `operator:sync:next-batch:v1`
 - **Message Format**: Outbound messages support Markdown, converted to Matrix HTML
 - **Security**: `command` runs with the process's permissions - treat as privileged config
 - **Legacy**: `autoCodex*` and `autoOpenCode*` config keys are no longer supported
