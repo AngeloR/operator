@@ -15,7 +15,7 @@
       "model": "opencode/minimax-m2.5-free",
       "command": ["opencode", "run"],
       "commandPrefix": "!op",
-      "allowedCliCommands": ["usage", "stats", "models", "model", "help"],
+      "allowedCliCommands": ["usage", "stats", "models", "model", "start", "help"],
       "commandTimeoutSeconds": 30,
       "timeoutSeconds": 300,
       "heartbeatSeconds": 45,

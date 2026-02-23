@@ -83,6 +83,7 @@ You can use these commands directly in Matrix rooms:
 
 | Command                           | Description                                  |
 | --------------------------------- | -------------------------------------------- |
+| `!op start`                       | Run guided onboarding flow                   |
 | `!op usage <model> [--days N]`    | Show usage stats for a specific model        |
 | `!op stats [--days N] [--models]` | Show overall usage statistics                |
 | `!op models [--verbose]`          | List available models                        |
@@ -95,6 +96,7 @@ You can use these commands directly in Matrix rooms:
 Example:
 
 ```
+!op start
 !op usage openai/gpt-5.3-codex --days 30
 !op model openai/gpt-4-turbo
 ```

@@ -211,7 +211,7 @@ type ActiveAutoOpenCodeRun = {
   stopRequestedBy: string | null;
 };
 
-type AutoOpenCodeCliCommand = "usage" | "stats" | "models" | "model" | "help";
+type AutoOpenCodeCliCommand = "usage" | "stats" | "models" | "model" | "start" | "help";
 
 type ParsedAutoOpenCodeCliRequest = {
   command: AutoOpenCodeCliCommand;
@@ -226,7 +226,7 @@ const LEGACY_SYNC_TOKEN_KEY = "matrix-agent:sync:next-batch:v1";
 const DEFAULT_AUTO_OPENCODE_COMMAND = ["opencode", "run"];
 const DEFAULT_AUTO_OPENCODE_COMMAND_PREFIX = "!op";
 const MANAGEMENT_COMMAND_PREFIX = "!op";
-const DEFAULT_AUTO_OPENCODE_ALLOWED_CLI_COMMANDS = ["usage", "stats", "models", "model", "help"];
+const DEFAULT_AUTO_OPENCODE_ALLOWED_CLI_COMMANDS = ["usage", "stats", "models", "model", "start", "help"];
 const DEFAULT_AUTO_OPENCODE_COMMAND_TIMEOUT_SECONDS = 30;
 const DEFAULT_AUTO_OPENCODE_TIMEOUT_SECONDS = 300;
 const DEFAULT_AUTO_OPENCODE_HEARTBEAT_SECONDS = 45;
@@ -258,6 +258,7 @@ const AUTO_OPENCODE_CLI_ALLOWED_COMMANDS = new Set<AutoOpenCodeCliCommand>([
   "stats",
   "models",
   "model",
+  "start",
   "help",
 ]);
 const activeAutoOpenCodeRuns = new Map<string, ActiveAutoOpenCodeRun>();
@@ -621,10 +622,11 @@ function parseAllowedCliCommands(
       command !== "stats" &&
       command !== "models" &&
       command !== "model" &&
+      command !== "start" &&
       command !== "help"
     ) {
       throw new Error(
-        "allowedCliCommands entries must be one of: usage, stats, models, model, help",
+        "allowedCliCommands entries must be one of: usage, stats, models, model, start, help",
       );
     }
   }
@@ -1880,11 +1882,42 @@ function autoOpenCodeCliHelp(prefix: string): string {
   return [
     `OpenCode command mode is available with the ${prefix} prefix.`,
     "",
+    "Onboarding:",
+    `- ${prefix} start`,
+    "",
+    "CLI shortcuts:",
     `- ${prefix} usage <model> [--days N] [--project KEY]`,
     `- ${prefix} stats [--days N] [--models [N]] [--project KEY]`,
     `- ${prefix} models [provider] [--verbose] [--refresh]`,
     `- ${prefix} model [<model-id>|reset]`,
     `- ${prefix} help`,
+  ].join("\n");
+}
+
+function guidedStartFlow(commandPrefix: string): string {
+  return [
+    "Guided onboarding (first 10 minutes):",
+    "",
+    "1) Confirm command wiring",
+    `   - Run: ${commandPrefix} help`,
+    "   - Expected: command list appears in this room",
+    "",
+    "2) Confirm OpenCode CLI availability",
+    `   - Run: ${commandPrefix} models --verbose`,
+    "   - Expected: available providers/models list",
+    "",
+    "3) Check project model override",
+    `   - Run: ${commandPrefix} model`,
+    `   - Optional: set one with ${commandPrefix} model <model-id>`,
+    "",
+    "4) Send your first real task",
+    "   - Example prompt: Summarize this repository architecture in 5 bullets.",
+    "",
+    "5) Validate control flow",
+    "   - Send: stop",
+    "   - Expected: active job is cancelled and the bot waits for next instruction",
+    "",
+    "When all 5 steps pass, onboarding is complete.",
   ].join("\n");
 }
 
@@ -2043,6 +2076,7 @@ function generalHelp(commandPrefix: string): string {
     "- stop - Stop the current running job and wait",
     "",
     "OpenCode CLI commands:",
+    `- ${commandPrefix} start`,
     `- ${commandPrefix} usage <model> [--days N] [--project KEY]`,
     `- ${commandPrefix} stats [--days N] [--models [N]] [--project KEY]`,
     `- ${commandPrefix} models [provider] [--verbose] [--refresh]`,
@@ -2166,6 +2200,10 @@ async function executeAutoOpenCodeCliCommand(
 ): Promise<string> {
   if (request.command === "help") {
     return autoOpenCodeCliHelp(autoProject.commandPrefix);
+  }
+
+  if (request.command === "start") {
+    return guidedStartFlow(autoProject.commandPrefix);
   }
 
   if (!autoProject.allowedCliCommands.has(request.command)) {
@@ -2875,7 +2913,7 @@ Project-level config (all projects run the interactive agent):
   agent: "opencode"                                    # optional internal agent label (state/context)
   command: ["opencode","run"]                          # relay enforces JSON stream mode and requires opencode run
   commandPrefix: "!op"                                 # in-room command prefix for opencode CLI shortcuts
-  allowedCliCommands: ["usage","stats","models","model","help"] # command allowlist
+  allowedCliCommands: ["usage","stats","models","model","start","help"] # command allowlist
   commandTimeoutSeconds: 30                            # timeout for prefixed in-room opencode commands
   timeoutSeconds: 300                                  # timeout per message (0 disables timeout + forces 15m heartbeat)
   heartbeatSeconds: 45                                 # periodic heartbeat for debug mode (0 disables)
