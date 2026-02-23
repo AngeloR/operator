@@ -7,7 +7,7 @@ A Matrix-to-OpenCode bridge that lets you interact with OpenCode (AI coding assi
 `operator` is a relay service that:
 
 - Connects to your Matrix homeserver and monitors configured rooms for messages
-- Optionally runs OpenCode to respond to messages automatically using AI
+- Runs OpenCode to respond to messages automatically using AI
 - Provides an HTTP API for external agents to send/receive messages via Redis queues
 - Supports in-room CLI commands for checking usage, models, and managing model overrides
 
@@ -34,7 +34,7 @@ flowchart LR
 - [Bun](https://bun.sh/) runtime
 - Redis server
 - Matrix homeserver account with access token
-- OpenCode CLI (optional, for auto-response feature)
+- OpenCode CLI (required)
 
 ### Setup
 
