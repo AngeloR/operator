@@ -176,6 +176,7 @@ type CommandRunResult = {
   code: number | null;
   signal: NodeJS.Signals | null;
   timedOut: boolean;
+  aborted: boolean;
 };
 
 type CommandStreamHandlers = {
@@ -199,6 +200,15 @@ type AutoOpenCodeStreamHandlers = {
   onStreamPhase?: (phase: string) => void;
   onStreamText?: (text: string, isReasoning: boolean) => void;
   onThinkingTitle?: (title: string) => void;
+};
+
+type ActiveAutoOpenCodeRun = {
+  jobId: string;
+  roomId: string;
+  startedAt: number;
+  sender: string;
+  abortController: AbortController;
+  stopRequestedBy: string | null;
 };
 
 type AutoOpenCodeCliCommand = "usage" | "stats" | "models" | "model" | "help";
@@ -229,6 +239,11 @@ const DEFAULT_AUTO_OPENCODE_ACK_TEMPLATE =
   "Received your message. Starting OpenCode job {{job_id}}.";
 const DEFAULT_AUTO_OPENCODE_PROGRESS_TEMPLATE = "OpenCode {{phase}} (job {{job_id}}).";
 const DEFAULT_AUTO_OPENCODE_CONTEXT_TAIL_LINES = 60;
+const AUTO_OPENCODE_STOP_ALIASES = new Set<string>([
+  "stop",
+  "!stop",
+  `${DEFAULT_AUTO_OPENCODE_COMMAND_PREFIX} stop`,
+]);
 const AUTO_OPENCODE_MAX_MESSAGE_CHARS = 16_000;
 const AUTO_OPENCODE_MAX_CONTEXT_CHARS = 24_000;
 const AUTO_OPENCODE_DEDUP_WINDOW_MS = 30 * 60 * 1000;
@@ -245,6 +260,17 @@ const AUTO_OPENCODE_CLI_ALLOWED_COMMANDS = new Set<AutoOpenCodeCliCommand>([
   "model",
   "help",
 ]);
+const activeAutoOpenCodeRuns = new Map<string, ActiveAutoOpenCodeRun>();
+
+class AutoOpenCodeStoppedError extends Error {
+  readonly requestedBy: string | null;
+
+  constructor(requestedBy: string | null) {
+    super("OpenCode job stopped by user request");
+    this.name = "AutoOpenCodeStoppedError";
+    this.requestedBy = requestedBy;
+  }
+}
 
 if (!cfg.homeserverUrl || !cfg.accessToken) {
   throw new Error("config.json must include homeserverUrl and accessToken");
@@ -449,6 +475,25 @@ function buildMatrixContent(message: ParsedMessage): MatrixMessageContent {
 
 function queueKey(projectKey: string, direction: QueueDirection): string {
   return `${projectKey}:${direction}`;
+}
+
+function isStopMessage(body: string): boolean {
+  const normalized = body.trim().toLowerCase();
+  return AUTO_OPENCODE_STOP_ALIASES.has(normalized);
+}
+
+function requestStopForProject(projectKey: string, sender: string): {
+  stopped: boolean;
+  jobId: string | null;
+} {
+  const active = activeAutoOpenCodeRuns.get(projectKey);
+  if (!active) {
+    return { stopped: false, jobId: null };
+  }
+
+  active.stopRequestedBy = sender;
+  active.abortController.abort();
+  return { stopped: true, jobId: active.jobId };
 }
 
 function parseBoolean(
@@ -1407,6 +1452,7 @@ async function runCommandWithInput(
   input: string,
   timeoutMs: number | null,
   handlers?: CommandStreamHandlers,
+  abortSignal?: AbortSignal,
 ): Promise<CommandRunResult> {
   const executable = command[0];
   if (!executable) {
@@ -1417,6 +1463,7 @@ async function runCommandWithInput(
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    let aborted = false;
     let settled = false;
 
     const child: any = spawn(executable, command.slice(1), {
@@ -1430,23 +1477,47 @@ async function runCommandWithInput(
       fn();
     };
 
+    const terminateChild = (reason: "timeout" | "abort"): void => {
+      if (reason === "timeout") {
+        timedOut = true;
+      }
+      if (reason === "abort") {
+        aborted = true;
+      }
+
+      child.kill("SIGTERM");
+      setTimeout(() => {
+        child.kill("SIGKILL");
+      }, 1000).unref();
+    };
+
     let timeout: NodeJS.Timeout | null = null;
     if (timeoutMs !== null) {
       timeout = setTimeout(() => {
-        timedOut = true;
-        child.kill("SIGTERM");
-
-        setTimeout(() => {
-          child.kill("SIGKILL");
-        }, 1000).unref();
+        terminateChild("timeout");
       }, timeoutMs);
 
       timeout.unref();
     }
 
+    const onAbort = () => {
+      terminateChild("abort");
+    };
+
+    if (abortSignal) {
+      if (abortSignal.aborted) {
+        onAbort();
+      } else {
+        abortSignal.addEventListener("abort", onAbort, { once: true });
+      }
+    }
+
     child.on("error", (error: Error) => {
       if (timeout) {
         clearTimeout(timeout);
+      }
+      if (abortSignal) {
+        abortSignal.removeEventListener("abort", onAbort);
       }
       settle(() => reject(error));
     });
@@ -1484,6 +1555,9 @@ async function runCommandWithInput(
       if (timeout) {
         clearTimeout(timeout);
       }
+      if (abortSignal) {
+        abortSignal.removeEventListener("abort", onAbort);
+      }
       settle(() =>
         resolve({
           stdout,
@@ -1491,6 +1565,7 @@ async function runCommandWithInput(
           code,
           signal,
           timedOut,
+          aborted,
         })
       );
     });
@@ -1965,6 +2040,7 @@ function generalHelp(commandPrefix: string): string {
     "",
     "General commands:",
     `- !help - Show this help message`,
+    "- stop - Stop the current running job and wait",
     "",
     "OpenCode CLI commands:",
     `- ${commandPrefix} usage <model> [--days N] [--project KEY]`,
@@ -2341,6 +2417,7 @@ async function runAutoOpenCodePrompt(
   prompt: string,
   autoProject: AutoOpenCodeProject,
   handlers?: AutoOpenCodeStreamHandlers,
+  abortSignal?: AbortSignal,
 ): Promise<string> {
   const prepared = prepareAutoOpenCodeCommand(
     autoProject.command,
@@ -2418,6 +2495,7 @@ async function runAutoOpenCodePrompt(
     prompt,
     autoProject.timeoutMs,
     commandStreamHandlers,
+    abortSignal,
   );
 
   if (stdoutLineBuffer.trim()) {
@@ -2431,6 +2509,10 @@ async function runAutoOpenCodePrompt(
     throw new Error(
       `command timed out after ${timeoutSeconds}`,
     );
+  }
+
+  if (result.aborted) {
+    throw new AutoOpenCodeStoppedError(null);
   }
 
   if (streamError) {
@@ -3088,6 +3170,16 @@ async function runAutoOpenCodeProjectWorker(
         autoProject.verbosity !== "output" && autoProject.progressUpdates;
       const streamPhaseEventsEnabled =
         autoProject.verbosity === "debug" && autoProject.progressUpdates;
+      const abortController = new AbortController();
+
+      activeAutoOpenCodeRuns.set(autoProject.projectKey, {
+        jobId,
+        roomId: autoProject.roomId,
+        startedAt,
+        sender,
+        abortController,
+        stopRequestedBy: null,
+      });
 
       try {
         let ack: QueueEnvelope | null = null;
@@ -3344,6 +3436,7 @@ async function runAutoOpenCodeProjectWorker(
                 queueThinkingTitle(title);
               },
             },
+            abortController.signal,
           );
           maybeSendStreamUpdate(true);
         } finally {
@@ -3401,6 +3494,25 @@ async function runAutoOpenCodeProjectWorker(
           suppressedFinalOutput: suppressFinalOutput,
         });
       } catch (error: unknown) {
+        const activeRun = activeAutoOpenCodeRuns.get(autoProject.projectKey);
+        const requestedBy = activeRun?.stopRequestedBy ?? null;
+
+        if (error instanceof AutoOpenCodeStoppedError) {
+          const durationMs = Date.now() - startedAt;
+          recordProcessingLatency("auto_opencode_job", durationMs);
+          logEvent("info", "auto_opencode.job.stopped", {
+            projectKey: autoProject.projectKey,
+            queue: poppedQueue,
+            sender,
+            jobId,
+            durationMs,
+            agentQueue,
+            queuedUserEventId: envelope.id,
+            requestedBy,
+          });
+          continue;
+        }
+
         const detail =
           error instanceof Error ? error.message : "auto-opencode command failed";
         const durationMs = Date.now() - startedAt;
@@ -3425,6 +3537,11 @@ async function runAutoOpenCodeProjectWorker(
           queuedAgentEventId: outbound.id,
           error: detail,
         });
+      } finally {
+        const activeRun = activeAutoOpenCodeRuns.get(autoProject.projectKey);
+        if (activeRun?.jobId === jobId) {
+          activeAutoOpenCodeRuns.delete(autoProject.projectKey);
+        }
       }
     } catch (error: unknown) {
       const detail =
@@ -3486,6 +3603,7 @@ async function runAutoOpenCodeProjectSupervisor(
 async function runInboundLoop(
   inboundRedis: Redis,
   roomToProject: Map<string, string>,
+  autoOpenCodeProjectKeys: Set<string>,
   adminUserIds: Set<string>,
   botUserId?: string,
   managementRoomId?: string,
@@ -3677,6 +3795,47 @@ async function runInboundLoop(
           if (content["m.relates_to"] !== undefined) continue;
 
           const trimmed = body.trim();
+          const sender = nonEmptyText(event.sender);
+
+          if (
+            projectKey &&
+            sender &&
+            autoOpenCodeProjectKeys.has(projectKey) &&
+            isStopMessage(trimmed)
+          ) {
+            const stopStartedAt = Date.now();
+            const stopResult = requestStopForProject(projectKey, sender);
+            const stopBody = stopResult.stopped
+              ? `Stopping current job${stopResult.jobId ? ` (${stopResult.jobId})` : ""}. Waiting for your next instruction.`
+              : "No active job to stop right now. Waiting for your next instruction.";
+
+            try {
+              await sendToRoom(
+                roomId,
+                buildMatrixContent({ body: stopBody, format: "plain" }),
+              );
+              const durationMs = Date.now() - stopStartedAt;
+              logEvent("info", "inbound.stop.processed", {
+                roomId,
+                projectKey,
+                sender,
+                durationMs,
+                stopped: stopResult.stopped,
+                jobId: stopResult.jobId,
+              });
+            } catch (error: unknown) {
+              const detail = error instanceof Error ? error.message : String(error);
+              logEvent("error", "inbound.stop.response_failed", {
+                roomId,
+                projectKey,
+                sender,
+                error: detail,
+              });
+            }
+
+            continue;
+          }
+
           if (trimmed.startsWith("!help")) {
             let response: string;
             try {
@@ -3828,6 +3987,9 @@ async function commandDaemon(redisConfig: RedisConfig): Promise<void> {
     queueToProject.set(queueKey(projectKey, "agent"), projectKey);
   }
   const autoOpenCodeQueueToProject = buildAutoOpenCodeMap();
+  const autoOpenCodeProjectKeys = new Set(
+    [...autoOpenCodeQueueToProject.values()].map((item) => item.projectKey),
+  );
   await validateAutoOpenCodeProjects(autoOpenCodeQueueToProject);
 
   if (queueToProject.size === 0) {
@@ -3883,6 +4045,7 @@ async function commandDaemon(redisConfig: RedisConfig): Promise<void> {
   runInboundLoop(
     inboundRedis,
     roomToProject,
+    autoOpenCodeProjectKeys,
     adminUserIds,
     botUserId,
     cfg.managementRoomId,

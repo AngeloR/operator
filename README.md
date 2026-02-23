@@ -91,6 +91,7 @@ You can use these commands directly in Matrix rooms:
 | `!op model <model-id>`            | Set a model override for this project        |
 | `!op model reset`                 | Clear model override (use OpenCode default)  |
 | `!op help`                        | Show command help                            |
+| `stop`                            | Stop the active auto-opencode job            |
 
 Example:
 
