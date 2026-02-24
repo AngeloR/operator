@@ -2,6 +2,10 @@
 
 A Matrix-to-OpenCode bridge that lets you interact with OpenCode (AI coding assistant) directly from Matrix chat rooms.
 
+## Contributing
+
+See `CONTRIBUTING.md` for human and AI contributor workflows, branch/PR expectations, and pre-PR checks.
+
 ## What It Is
 
 `operator` is a relay service that:
