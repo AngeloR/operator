@@ -11,6 +11,8 @@ A Matrix-to-OpenCode bridge that lets you interact with OpenCode (AI coding assi
 - Provides an HTTP API for external agents to send/receive messages via Redis queues
 - Supports in-room CLI commands for checking usage, models, and managing model overrides
 
+Architecture reference: [`ARCHITECTURE.md`](ARCHITECTURE.md)
+
 ## How It Works
 
 ```mermaid
