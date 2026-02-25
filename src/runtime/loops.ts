@@ -9,7 +9,8 @@ import {
   type MatrixClientConfig,
   type MatrixTimelineEvent,
 } from "./matrix";
-import { type QueueDirection, type QueueEnvelope, type Redis } from "./redis";
+import { type Redis } from "./redis";
+import { type QueueDirection, type QueueEnvelope } from "../types/contracts";
 
 export type RunOutboundLoopOptions = {
   outboundRedis: Redis;
