@@ -6,7 +6,7 @@
 
 ```mermaid
 flowchart LR
-    M[Matrix Homeserver] -->|/sync events| R[relay-core runtime]
+    M[Matrix Homeserver] -->|/sync events| R[operator runtime]
     R -->|enqueue user envelope| U[(Redis: project:user)]
 
     U -->|BLPOP| W[auto-opencode worker]
@@ -63,7 +63,7 @@ Authentication for `/v1/agent/*` is Bearer token based (`agentApiToken`/`agentAp
 - `src/runtime/redis.ts`: Redis connectivity, queue key naming, envelope encode/decode.
 - `src/runtime/matrix.ts`: Matrix API client helpers and event/content transformations.
 - `src/runtime/loops.ts`: inbound `/sync` ingestion and outbound queue-to-Matrix delivery loops.
-- `src/runtime/http.ts`: relay-core HTTP facade for health, metrics, and external agent APIs.
+- `src/runtime/http.ts`: operator HTTP facade for health, metrics, and external agent APIs.
 - `src/worker/auto-opencode.ts`: per-project worker + supervisor lifecycle.
 - `src/runtime/process.ts`: process execution and OpenCode stream handling.
 - `src/worker/context-state.ts`: rolling context files used to build each OpenCode prompt.

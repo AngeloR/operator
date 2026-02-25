@@ -7,7 +7,7 @@ Responsibility split:
 - `src/runtime/config.ts`: config schema/types, token/admin parsing, config persistence/loading, project lookup, room/project mapping.
 - `src/runtime/redis.ts`: Redis connectivity, queue keying, queue envelope encode/decode.
 - `src/runtime/matrix.ts`: Matrix HTTP client helpers, message rendering, room join/sync primitives, timeline-to-queue conversion.
-- `src/runtime/http.ts`: relay-core HTTP facade (`/health`, `/v1/metrics`, `/v1/agent/*`) with auth and payload validation.
+- `src/runtime/http.ts`: operator HTTP facade (`/health`, `/v1/metrics`, `/v1/agent/*`) with auth and payload validation.
 - `src/runtime/loops.ts`: inbound/outbound Matrix-Redis worker loops and event routing glue.
 - `src/runtime/process.ts`: command process execution, OpenCode run command preparation, and stream-to-output parsing.
 - `src/worker/auto-opencode.ts`: auto-opencode project worker and supervisor loop implementations.
