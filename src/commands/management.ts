@@ -1,5 +1,6 @@
 import { buildInitialSenderAllowlist } from "../sender-allowlist";
 import { nonEmptyText } from "../text";
+import { renderManagementCommandHelp } from "../copy/management";
 import {
   loadConfig,
   persistProjectConfig,
@@ -137,34 +138,7 @@ export function parseManagementCommandArgs(args: string[]): ParsedManagementComm
 }
 
 export function managementCommandHelp(commandPrefix: string): string {
-  return [
-    "Project management commands:",
-    "(run these in the management room)",
-    "",
-    `- ${commandPrefix} list`,
-    "  Show all configured projects",
-    `  Example: ${commandPrefix} list`,
-    "",
-    `- ${commandPrefix} create <name> --room <roomId> --path <directory>`,
-    "  Create a new project",
-    `  Example: ${commandPrefix} create operator --room !QefzZvtgPwIGrHuOuo:palantir --path /home/xangelo/repos/operator`,
-    "",
-    `- ${commandPrefix} delete <name>`,
-    "  Delete a project (use with caution)",
-    `  Example: ${commandPrefix} delete operator`,
-    "",
-    `- ${commandPrefix} show <name>`,
-    "  Display project configuration",
-    `  Example: ${commandPrefix} show operator`,
-    "",
-    `- ${commandPrefix} reload`,
-    "  Hot-reload config from disk",
-    `  Example: ${commandPrefix} reload`,
-    "",
-    `- ${commandPrefix} help`,
-    "  Show this help message",
-    `  Example: ${commandPrefix} help`,
-  ].join("\n");
+  return renderManagementCommandHelp(commandPrefix);
 }
 
 export async function executeManagementCommand(
