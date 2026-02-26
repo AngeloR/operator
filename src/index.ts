@@ -1032,12 +1032,12 @@ async function main() {
   const [command = "daemon", ...args] = process.argv.slice(2);
   const cli = parseCliArgs(args);
 
-  projects = await loadConfig(CONFIG_JSON_PATH, cfg);
-
   if (command === "help" || command === "--help" || command === "-h") {
     printUsage();
     return;
   }
+
+  projects = await loadConfig(CONFIG_JSON_PATH, cfg);
 
   const redisConfig = resolveRedisConfig(cfg);
 
