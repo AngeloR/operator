@@ -11,12 +11,6 @@
 - Risk level: low / medium / high
 - Rollback plan:
 
-## Verification
-
-- [ ] `bunx tsc --noEmit`
-- [ ] `bun test`
-- [ ] Manual validation (if applicable):
-
 ## Checklist
 
 - [ ] Docs updated (if behavior/config changed)
