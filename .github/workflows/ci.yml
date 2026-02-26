@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  quality-gates:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bunx tsc --noEmit
+
+      - name: Test
+        run: bun test
+
+      - name: Smoke check CLI startup path
+        run: |
+          OUTPUT="$(bun run src/index.ts help)"
+          if [[ "$OUTPUT" != *"Commands:"* ]]; then
+            echo "Smoke check failed: expected help output to contain 'Commands:'"
+            exit 1
+          fi
