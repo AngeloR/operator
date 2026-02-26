@@ -1,4 +1,3 @@
-import config from "../config.json";
 import { stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -74,7 +73,11 @@ type ParsedCli = {
   options: Map<string, string | true>;
 };
 
-const cfg = config as AppConfig;
+const cfg: AppConfig = {
+  homeserverUrl: "",
+  accessToken: "",
+  projects: {},
+};
 let projects = cfg.projects ?? {};
 const CONFIG_JSON_PATH = fileURLToPath(new URL("../config.json", import.meta.url));
 const SYNC_TOKEN_KEY = "operator:sync:next-batch:v1";
@@ -116,10 +119,6 @@ function matrixClientConfig(): MatrixClientConfig {
     homeserverUrl: cfg.homeserverUrl,
     accessToken: cfg.accessToken,
   };
-}
-
-if (!cfg.homeserverUrl || !cfg.accessToken) {
-  throw new Error("config.json must include homeserverUrl and accessToken");
 }
 
 function isStopMessage(body: string): boolean {
@@ -1032,6 +1031,8 @@ async function commandDaemon(redisConfig: RedisConfig): Promise<void> {
 async function main() {
   const [command = "daemon", ...args] = process.argv.slice(2);
   const cli = parseCliArgs(args);
+
+  projects = await loadConfig(CONFIG_JSON_PATH, cfg);
 
   if (command === "help" || command === "--help" || command === "-h") {
     printUsage();
