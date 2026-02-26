@@ -1,4 +1,3 @@
-import config from "../config.json";
 import { stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -41,11 +40,10 @@ import {
   parseEnvelope,
   queueKey,
   resolveRedisConfig,
-  type QueueDirection,
-  type QueueEnvelope,
   type Redis,
   type RedisConfig,
 } from "./runtime/redis";
+import { type QueueDirection, type QueueEnvelope } from "./types/contracts";
 import {
   buildMatrixContent,
   fetchBotUserId,
@@ -75,7 +73,11 @@ type ParsedCli = {
   options: Map<string, string | true>;
 };
 
-const cfg = config as AppConfig;
+const cfg: AppConfig = {
+  homeserverUrl: "",
+  accessToken: "",
+  projects: {},
+};
 let projects = cfg.projects ?? {};
 const CONFIG_JSON_PATH = fileURLToPath(new URL("../config.json", import.meta.url));
 const SYNC_TOKEN_KEY = "operator:sync:next-batch:v1";
@@ -117,10 +119,6 @@ function matrixClientConfig(): MatrixClientConfig {
     homeserverUrl: cfg.homeserverUrl,
     accessToken: cfg.accessToken,
   };
-}
-
-if (!cfg.homeserverUrl || !cfg.accessToken) {
-  throw new Error("config.json must include homeserverUrl and accessToken");
 }
 
 function isStopMessage(body: string): boolean {
@@ -990,6 +988,8 @@ async function main() {
     printUsage();
     return;
   }
+
+  projects = await loadConfig(CONFIG_JSON_PATH, cfg);
 
   const redisConfig = resolveRedisConfig(cfg);
 

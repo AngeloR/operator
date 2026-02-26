@@ -1,4 +1,4 @@
-export const RUNTIME_USAGE_TEXT = `matrix-relay-core
+export const RUNTIME_USAGE_TEXT = `operator
 
 Commands:
   daemon (default)
@@ -36,7 +36,7 @@ Project-level config (all projects run the interactive agent):
   senderAllowlist: ["@admin:your-server"]              # required
   progressUpdates: true                                # default true
   stateDir: ".operator-state"                          # default
-  projectWorkingDirectory: "/abs/path/to/project"      # default: current relay-core cwd
+  projectWorkingDirectory: "/abs/path/to/project"      # default: current operator cwd
   model: "opencode/minimax-m2.5-free"                  # optional per-project model override
   ackTemplate: "Starting OpenCode {{job_id}}."         # used when verbosity=debug
   progressTemplate: "OpenCode {{phase}} ({{job_id}})." # used for debug status updates

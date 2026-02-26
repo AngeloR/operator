@@ -3,11 +3,18 @@
   "module": "src/index.ts",
   "type": "module",
   "private": true,
+  "scripts": {
+    "postinstall": "simple-git-hooks"
+  },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "simple-git-hooks": "^2.13.1"
   },
   "peerDependencies": {
     "typescript": "^5"
+  },
+  "simple-git-hooks": {
+    "pre-commit": "bunx tsc --noEmit && bun test"
   },
   "dependencies": {
     "marked": "^17.0.3"

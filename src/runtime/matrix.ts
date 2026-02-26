@@ -1,6 +1,6 @@
 import { marked } from "marked";
 import { nonEmptyText, type MessageFormat } from "../text";
-import { type QueueEnvelope } from "./redis";
+import { type QueueEnvelope } from "../types/contracts";
 
 export type MatrixClientConfig = {
   homeserverUrl: string;

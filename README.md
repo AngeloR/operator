@@ -21,7 +21,7 @@ Architecture reference: [`ARCHITECTURE.md`](ARCHITECTURE.md)
 
 ```mermaid
 flowchart LR
-    A[Matrix Room] -->|messages| B[operator<br/>relay-core]
+    A[Matrix Room] -->|messages| B[operator runtime]
     B -->|queue| C[Redis Queue]
     B -->|spawn| D[OpenCode]
     
@@ -219,6 +219,10 @@ bun run src/index.ts poll-user my-project --block 30
 - **Message Format**: Outbound messages support Markdown, converted to Matrix HTML
 - **Security**: `command` runs with the process's permissions - treat as privileged config
 - **Legacy**: `autoCodex*` and `autoOpenCode*` config keys are no longer supported
+
+## Naming
+
+The canonical public project name is `operator`. Older references to `matrix-relay-core` have been normalized to `operator` in docs and runtime output.
 
 ## Development
 

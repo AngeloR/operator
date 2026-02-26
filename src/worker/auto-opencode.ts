@@ -1,7 +1,8 @@
 import { appendStreamText, formatThinkingStreamDelta } from "../opencode-stream";
 import { logEvent, recordFailure, recordProcessingLatency, recordWorkerRestart } from "../metrics";
 import { type MessageFormat, truncateInline, truncateText } from "../text";
-import { type QueueDirection, type QueueEnvelope, type Redis, type RedisConfig } from "../runtime/redis";
+import { type Redis, type RedisConfig } from "../runtime/redis";
+import { type QueueDirection, type QueueEnvelope } from "../types/contracts";
 
 export type AutoOpenCodeVerbosity = "debug" | "thinking" | "thinking-complete" | "output";
 
