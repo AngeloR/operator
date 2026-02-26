@@ -6,12 +6,14 @@ import {
 } from "../metrics";
 import { nonEmptyText, parseFormat, parseOptionalString, type MessageFormat } from "../text";
 import { type ProjectConfig } from "./config";
+import { type Redis } from "./redis";
 import {
+  type AgentPollRequestPayload,
+  type AgentSendRequestPayload,
   type QueueDirection,
   type QueueEnvelope,
-  type Redis,
-  type QueueEnvelope as Envelope,
-} from "./redis";
+  type QueueEnvelopeExtras,
+} from "../types/contracts";
 
 type JsonObject = Record<string, unknown>;
 
@@ -44,8 +46,8 @@ type HttpFacadeDependencies = {
     roomId: string,
     body: string,
     format: MessageFormat,
-    extras: { agent?: string; sender?: string },
-  ) => Envelope;
+    extras: QueueEnvelopeExtras,
+  ) => QueueEnvelope;
 };
 
 function json(status: number, payload: unknown): Response {
@@ -118,7 +120,7 @@ function authorizeAgentRequest(req: Request, tokens: Set<string>): Response | nu
   return null;
 }
 
-function parseProjectKeyFromPayload(payload: JsonObject): string {
+function parseProjectKeyFromPayload(payload: AgentPollRequestPayload | AgentSendRequestPayload): string {
   const projectKey = nonEmptyText(payload.project) ?? nonEmptyText(payload.project_key);
   if (!projectKey) {
     throw new Error("missing project (or project_key)");
@@ -126,7 +128,7 @@ function parseProjectKeyFromPayload(payload: JsonObject): string {
   return projectKey;
 }
 
-function parseAgentPollRequest(payload: JsonObject): AgentPollRequest {
+function parseAgentPollRequest(payload: AgentPollRequestPayload): AgentPollRequest {
   const agent = parseOptionalString(payload.agent);
   const blockSeconds = parseBlockSeconds(payload.block_seconds, 30);
 
@@ -137,7 +139,7 @@ function parseAgentPollRequest(payload: JsonObject): AgentPollRequest {
   };
 }
 
-function parseAgentSendRequest(payload: JsonObject): AgentSendRequest {
+function parseAgentSendRequest(payload: AgentSendRequestPayload): AgentSendRequest {
   const markdown = nonEmptyText(payload.markdown);
   const body =
     nonEmptyText(payload.body) ??
@@ -176,7 +178,7 @@ export async function startHttpFacade(
     let parsed: AgentPollRequest;
     try {
       const payload = await parseJsonObject(req);
-      parsed = parseAgentPollRequest(payload);
+      parsed = parseAgentPollRequest(payload as AgentPollRequestPayload);
     } catch (error: unknown) {
       const detail = error instanceof Error ? error.message : String(error);
       return json(400, { error: detail });
@@ -229,7 +231,7 @@ export async function startHttpFacade(
     let parsed: AgentSendRequest;
     try {
       const payload = await parseJsonObject(req);
-      parsed = parseAgentSendRequest(payload);
+      parsed = parseAgentSendRequest(payload as AgentSendRequestPayload);
     } catch (error: unknown) {
       const detail = error instanceof Error ? error.message : String(error);
       return json(400, { error: detail });

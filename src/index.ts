@@ -40,11 +40,10 @@ import {
   parseEnvelope,
   queueKey,
   resolveRedisConfig,
-  type QueueDirection,
-  type QueueEnvelope,
   type Redis,
   type RedisConfig,
 } from "./runtime/redis";
+import { type QueueDirection, type QueueEnvelope } from "./types/contracts";
 import {
   buildMatrixContent,
   fetchBotUserId,

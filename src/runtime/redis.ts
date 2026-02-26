@@ -1,18 +1,12 @@
 import { RedisClient } from "bun";
 import { nonEmptyText, parseFormat, parseOptionalString, type MessageFormat } from "../text";
+import {
+  type QueueDirection,
+  type QueueEnvelope,
+  type QueueEnvelopeExtras,
+} from "../types/contracts";
 
-export type QueueDirection = "agent" | "user";
-
-export type QueueEnvelope = {
-  id: string;
-  projectKey: string;
-  roomId: string;
-  body: string;
-  format: MessageFormat;
-  agent?: string;
-  sender?: string;
-  receivedAt: string;
-};
+export type { QueueDirection, QueueEnvelope } from "../types/contracts";
 
 export type Redis = RedisClient;
 
@@ -126,7 +120,7 @@ export function createEnvelope(
   roomId: string,
   body: string,
   format: MessageFormat,
-  extras: { agent?: string; sender?: string },
+  extras: QueueEnvelopeExtras,
 ): QueueEnvelope {
   return {
     id: crypto.randomUUID(),

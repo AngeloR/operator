@@ -1,7 +1,7 @@
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tailLines, truncateText } from "../text";
-import { type QueueEnvelope } from "../runtime/redis";
+import { type QueueEnvelope } from "../types/contracts";
 import { type AutoOpenCodeProject } from "./auto-opencode";
 
 export type AutoOpenCodeStatePaths = {
