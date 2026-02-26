@@ -280,7 +280,7 @@ export async function startHttpFacade(
       );
       return json(200, {
         ok: true,
-        service: "matrix-relay-core",
+        service: "operator",
         generatedAt: new Date().toISOString(),
         queueDepth,
         ...buildMetricsSnapshot(),
@@ -305,7 +305,7 @@ export async function startHttpFacade(
       if ((path === "/health" || path === "/v1/health") && method === "GET") {
         return json(200, {
           ok: true,
-          service: "matrix-relay-core",
+          service: "operator",
           authConfigured: authTokens.size > 0,
         });
       }
