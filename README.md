@@ -48,7 +48,7 @@ Allowed attachments are downloaded to local temp storage and included in the pol
 - [Bun](https://bun.sh/) runtime
 - Redis server
 - Matrix homeserver account with access token
-- OpenCode CLI (required)
+- Harness CLI(s) you plan to use (`opencode`, `codex`, and/or `claude`)
 
 ### Setup
 
@@ -91,6 +91,12 @@ cp config.example.json config.json
 ```bash
 bun run src/index.ts
 ```
+
+### Harness Setup Notes
+
+- `opencode` projects can omit `command`; default is `["opencode", "run"]`.
+- `codex` and `claude` projects must set `command` explicitly to a non-interactive CLI invocation that reads prompt text from stdin and writes final output to stdout.
+- On startup, operator validates that the configured command executable exists and returns a clear error if not.
 
 ## In-Room Commands
 
@@ -196,7 +202,7 @@ curl http://localhost:8888/v1/metrics
 | `harness`                | No       | Harness selector: `opencode`, `codex`, or `claude` (default: `opencode`) |
 | `prefix`                 | No       | Legacy prefix for message routing                               |
 | `agent`                  | No       | Agent label (default: `opencode`)                               |
-| `command`                | No       | Command to run (default: `["opencode", "run"]`)                 |
+| `command`                | No*      | CLI command to run (*required for `codex`/`claude`; optional for `opencode`) |
 | `commandPrefix`          | No       | In-room command prefix (default: `!op`)                         |
 | `projectWorkingDirectory`| Yes      | Working directory for OpenCode                                  |
 | `senderAllowlist`        | Yes      | Allowed senders (auto-seeded for `!op create` projects)        |

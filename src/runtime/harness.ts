@@ -1,6 +1,8 @@
 import { type MessageFormat } from "../text";
 import { type QueueEnvelope } from "../types/contracts";
 import { type Harness, type ProjectConfig } from "./config";
+import { claudeAdapter } from "./claude-adapter";
+import { codexAdapter } from "./codex-adapter";
 
 export type HarnessRunInput = {
   projectKey: string;
@@ -35,18 +37,8 @@ const HARNESS_REGISTRY: Record<Harness, HarnessAdapter> = {
     available: true,
     validateProjectConfig: () => {},
   },
-  codex: {
-    harness: "codex",
-    available: false,
-    unavailableReason: "Codex adapter not implemented yet (planned for Phase 4)",
-    validateProjectConfig: () => {},
-  },
-  claude: {
-    harness: "claude",
-    available: false,
-    unavailableReason: "Claude adapter not implemented yet (planned for Phase 4)",
-    validateProjectConfig: () => {},
-  },
+  codex: codexAdapter,
+  claude: claudeAdapter,
 };
 
 export function resolveHarnessAdapter(harness: Harness): HarnessAdapter {

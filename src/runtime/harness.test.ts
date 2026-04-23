@@ -11,23 +11,26 @@ describe("runtime/harness", () => {
     expect(adapter.available).toBe(true);
   });
 
-  test("rejects unavailable harness adapters at project resolution", () => {
-    expect(() =>
-      resolveProjectHarnessAdapter("alpha", {
-        roomId: "!alpha:example.org",
-        harness: "codex",
-      }),
-    ).toThrow(
-      'project "alpha" uses harness "codex", but it is not available yet: Codex adapter not implemented yet (planned for Phase 4)',
-    );
+  test("resolves codex and claude adapters", () => {
+    const codex = resolveProjectHarnessAdapter("alpha", {
+      roomId: "!alpha:example.org",
+      harness: "codex",
+      senderAllowlist: ["@alice:example.org"],
+      command: ["bun", "-e", "process.stdout.write('ok')"],
+    });
 
-    expect(() =>
-      resolveProjectHarnessAdapter("beta", {
-        roomId: "!beta:example.org",
-        harness: "claude",
-      }),
-    ).toThrow(
-      'project "beta" uses harness "claude", but it is not available yet: Claude adapter not implemented yet (planned for Phase 4)',
-    );
+    const claude = resolveProjectHarnessAdapter("beta", {
+      roomId: "!beta:example.org",
+      harness: "claude",
+      senderAllowlist: ["@bob:example.org"],
+      command: ["bun", "-e", "process.stdout.write('ok')"],
+    });
+
+    expect(codex.harness).toBe("codex");
+    expect(codex.available).toBe(true);
+    expect(typeof codex.run).toBe("function");
+    expect(claude.harness).toBe("claude");
+    expect(claude.available).toBe(true);
+    expect(typeof claude.run).toBe("function");
   });
 });

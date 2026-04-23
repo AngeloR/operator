@@ -53,6 +53,11 @@ import { startHttpFacade } from "./runtime/http";
 import { runInboundLoop, runOutboundLoop } from "./runtime/loops";
 import { resolveProjectHarnessAdapter } from "./runtime/harness";
 import {
+  runFinalOutputProjectSupervisor,
+  runFinalOutputProjectWorker,
+  type FinalOutputWorkerProject,
+} from "./runtime/harness-worker";
+import {
   DEFAULT_OPENCODE_COMMAND_PREFIX,
   OpenCodeAdapter,
 } from "./runtime/opencode-adapter";
@@ -785,12 +790,19 @@ async function commandDaemon(redisConfig: RedisConfig): Promise<void> {
   });
   const queueToProject = new Map<string, string>();
   const opencodeProjectKeys = new Set<string>();
+  const finalOutputProjects: FinalOutputWorkerProject[] = [];
 
   for (const [projectKey] of Object.entries(projects)) {
     const project = resolveProject(projects, projectKey);
     const adapter = resolveProjectHarnessAdapter(projectKey, project);
     if (adapter.harness === "opencode") {
       opencodeProjectKeys.add(projectKey);
+    } else {
+      finalOutputProjects.push({
+        projectKey,
+        project,
+        adapter,
+      });
     }
     queueToProject.set(queueKey(projectKey, "agent"), projectKey);
   }
@@ -931,6 +943,35 @@ async function commandDaemon(redisConfig: RedisConfig): Promise<void> {
         logEvent("error", "auto_opencode.supervisor.fatal", {
           projectKey: autoProject.projectKey,
           queue: userQueue,
+          error: detail,
+        });
+      },
+    );
+  }
+
+  for (const finalOutputProject of finalOutputProjects) {
+    runFinalOutputProjectSupervisor({
+      redisConfig,
+      project: finalOutputProject,
+      workerClients: autoOpenCodeWorkerClients,
+      restartBaseDelayMs: AUTO_OPENCODE_WORKER_RESTART_BASE_DELAY_MS,
+      restartMaxDelayMs: AUTO_OPENCODE_WORKER_RESTART_MAX_DELAY_MS,
+      createRedisClient,
+      runWorker: (workerRedis, project) =>
+        runFinalOutputProjectWorker({
+          redis: workerRedis,
+          project,
+          parseEnvelope,
+          queueKey,
+          createEnvelope,
+        }),
+    }).catch(
+      (error: unknown) => {
+        const detail = error instanceof Error ? error.message : String(error);
+        recordFailure("harness_supervisor_fatal", finalOutputProject.projectKey);
+        logEvent("error", "harness.supervisor.fatal", {
+          projectKey: finalOutputProject.projectKey,
+          harness: finalOutputProject.adapter.harness,
           error: detail,
         });
       },
