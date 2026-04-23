@@ -1,6 +1,7 @@
 import { RedisClient } from "bun";
 import { nonEmptyText, parseFormat, parseOptionalString, type MessageFormat } from "../text";
 import {
+  type QueueAttachment,
   type QueueDirection,
   type QueueEnvelope,
   type QueueEnvelopeExtras,
@@ -182,6 +183,7 @@ export function parseEnvelope(
   const candidateProject = nonEmptyText(obj.projectKey);
   const candidateRoom = nonEmptyText(obj.roomId);
   const candidateReceivedAt = nonEmptyText(obj.receivedAt);
+  const attachments = parseQueueAttachments(obj.attachments);
 
   return {
     id: candidateId ?? crypto.randomUUID(),
@@ -192,5 +194,59 @@ export function parseEnvelope(
     agent: parseOptionalString(obj.agent),
     sender: parseOptionalString(obj.sender),
     receivedAt: candidateReceivedAt ?? new Date().toISOString(),
+    ...(attachments.length > 0 ? { attachments } : {}),
   };
+}
+
+function parseQueueAttachments(value: unknown): QueueAttachment[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const attachments: QueueAttachment[] = [];
+
+  for (const item of value) {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) {
+      continue;
+    }
+
+    const obj = item as Record<string, unknown>;
+    const id = nonEmptyText(obj.id) ?? crypto.randomUUID();
+    const filename = nonEmptyText(obj.filename);
+    const kind = nonEmptyText(obj.kind);
+    const sourceMxc = nonEmptyText(obj.sourceMxc);
+    const downloadStatus = nonEmptyText(obj.downloadStatus);
+
+    if (!filename || !sourceMxc) {
+      continue;
+    }
+
+    if (kind !== "text" && kind !== "image") {
+      continue;
+    }
+
+    if (downloadStatus !== "downloaded" && downloadStatus !== "rejected" && downloadStatus !== "failed") {
+      continue;
+    }
+
+    const sizeRaw = obj.sizeBytes;
+    const sizeBytes =
+      typeof sizeRaw === "number" && Number.isFinite(sizeRaw) && sizeRaw >= 0
+        ? Math.floor(sizeRaw)
+        : undefined;
+
+    attachments.push({
+      id,
+      filename,
+      kind,
+      sourceMxc,
+      downloadStatus,
+      mimeType: parseOptionalString(obj.mimeType),
+      localPath: parseOptionalString(obj.localPath),
+      error: parseOptionalString(obj.error),
+      ...(sizeBytes !== undefined ? { sizeBytes } : {}),
+    });
+  }
+
+  return attachments;
 }

@@ -2,12 +2,15 @@ import { logEvent, recordFailure, recordProcessingLatency } from "../metrics";
 import { nonEmptyText } from "../text";
 import {
   buildMatrixContent,
+  buildThreadRelation,
   joinMatrixRoom,
   sendToRoom,
+  splitMessageBodyForMatrix,
   syncMatrix,
   toUserQueueEnvelope,
   type MatrixClientConfig,
   type MatrixTimelineEvent,
+  utf8ByteLength,
 } from "./matrix";
 import { type Redis } from "./redis";
 import { type QueueDirection, type QueueEnvelope } from "../types/contracts";
@@ -40,6 +43,10 @@ export type RunInboundLoopOptions = {
   managementRoomId?: string;
 };
 
+const MATRIX_INLINE_MAX_BYTES = 12 * 1024;
+const MATRIX_CHUNK_MAX_BYTES = 8 * 1024;
+const MATRIX_LARGE_MESSAGE_BYTES = 40 * 1024;
+
 export async function runOutboundLoop(options: RunOutboundLoopOptions): Promise<never> {
   const queueNames = [...options.queueToProject.keys()];
 
@@ -68,15 +75,62 @@ export async function runOutboundLoop(options: RunOutboundLoopOptions): Promise<
       const startedAt = Date.now();
 
       try {
-        const eventId = await sendToRoom(
-          options.matrixClientConfig(),
-          envelope.roomId,
-          buildMatrixContent({
-            body: envelope.body,
-            format: envelope.format,
-            agent: envelope.agent,
-          }),
-        );
+        const bodyBytes = utf8ByteLength(envelope.body);
+        let eventId = "";
+        let chunkCount = 1;
+
+        if (bodyBytes <= MATRIX_INLINE_MAX_BYTES) {
+          eventId = await sendToRoom(
+            options.matrixClientConfig(),
+            envelope.roomId,
+            buildMatrixContent({
+              body: envelope.body,
+              format: envelope.format,
+              agent: envelope.agent,
+            }),
+          );
+        } else {
+          const chunks = splitMessageBodyForMatrix(envelope.body, MATRIX_CHUNK_MAX_BYTES);
+          chunkCount = chunks.length;
+          let rootEventId: string | null = null;
+
+          for (let index = 0; index < chunks.length; index += 1) {
+            const chunk = chunks[index] ?? "";
+            const header = `[Part ${index + 1}/${chunks.length} | ${envelope.id}]`;
+            const chunkBody = `${header}\n${chunk}`;
+            const chunkEventId = await sendToRoom(
+              options.matrixClientConfig(),
+              envelope.roomId,
+              buildMatrixContent(
+                {
+                  body: chunkBody,
+                  format: envelope.format,
+                  agent: envelope.agent,
+                },
+                rootEventId ? buildThreadRelation(rootEventId) : undefined,
+              ),
+            );
+
+            if (!rootEventId) {
+              rootEventId = chunkEventId;
+              eventId = chunkEventId;
+            }
+          }
+
+          if (bodyBytes > MATRIX_LARGE_MESSAGE_BYTES) {
+            logEvent("info", "outbound.send.chunked.large", {
+              projectKey,
+              queue: poppedQueue,
+              sender: envelope.sender ?? null,
+              roomId: envelope.roomId,
+              queuedEventId: envelope.id,
+              bodyBytes,
+              chunkCount,
+              note: "attachment fallback not configured; delivered as chunks",
+            });
+          }
+        }
+
         const durationMs = Date.now() - startedAt;
         recordProcessingLatency("outbound_send", durationMs);
         logEvent("info", "outbound.send.success", {
@@ -87,6 +141,8 @@ export async function runOutboundLoop(options: RunOutboundLoopOptions): Promise<
           roomId: envelope.roomId,
           queuedEventId: envelope.id,
           matrixEventId: eventId,
+          bodyBytes,
+          chunkCount,
         });
       } catch (error: unknown) {
         const detail =
@@ -420,11 +476,13 @@ export async function runInboundLoop(options: RunInboundLoopOptions): Promise<ne
             continue;
           }
 
-          const envelope = toUserQueueEnvelope(
+          const envelope = await toUserQueueEnvelope(
+            options.matrixClientConfig(),
             event,
             projectKey,
             roomId,
             options.adminUserIds,
+            undefined,
             options.botUserId,
           );
 
