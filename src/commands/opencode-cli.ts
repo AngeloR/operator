@@ -117,19 +117,33 @@ export function splitCommandTokens(input: string): string[] {
 
 export function parseAutoOpenCodeCliRequest(
   message: string,
-  prefix: string,
+  prefixes: string | string[],
 ): ParsedAutoOpenCodeCliRequest | null {
   const trimmed = message.trim();
-  if (!trimmed.startsWith(prefix)) {
+  const prefixList = (Array.isArray(prefixes) ? prefixes : [prefixes])
+    .map((prefix) => prefix.trim())
+    .filter((prefix) => prefix.length > 0);
+
+  let matchedPrefix: string | null = null;
+  for (const prefix of prefixList) {
+    if (!trimmed.startsWith(prefix)) {
+      continue;
+    }
+
+    const nextChar = trimmed.charAt(prefix.length);
+    if (nextChar && !/\s/.test(nextChar)) {
+      continue;
+    }
+
+    matchedPrefix = prefix;
+    break;
+  }
+
+  if (!matchedPrefix) {
     return null;
   }
 
-  const nextChar = trimmed.charAt(prefix.length);
-  if (nextChar && !/\s/.test(nextChar)) {
-    return null;
-  }
-
-  const rest = trimmed.slice(prefix.length).trim();
+  const rest = trimmed.slice(matchedPrefix.length).trim();
   const tokens = splitCommandTokens(rest);
   const commandToken = tokens[0]?.toLowerCase() ?? "help";
   if (!AUTO_OPENCODE_CLI_ALLOWED_COMMANDS.has(commandToken as AutoOpenCodeCliCommand)) {

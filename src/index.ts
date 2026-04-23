@@ -94,7 +94,8 @@ const SYNC_TOKEN_KEY = "operator:sync:next-batch:v1";
 const LEGACY_SYNC_TOKEN_KEY = "matrix-agent:sync:next-batch:v1";
 const DEFAULT_AUTO_OPENCODE_COMMAND = ["opencode", "run"];
 const DEFAULT_AUTO_OPENCODE_COMMAND_PREFIX = "!op";
-const MANAGEMENT_COMMAND_PREFIX = "!op";
+const MANAGEMENT_COMMAND_PREFIX = "!agent";
+const MANAGEMENT_COMMAND_PREFIX_ALIASES = [MANAGEMENT_COMMAND_PREFIX, "!op"];
 const DEFAULT_AUTO_OPENCODE_ALLOWED_CLI_COMMANDS = ["usage", "stats", "models", "model", "start", "help"];
 const DEFAULT_AUTO_OPENCODE_COMMAND_TIMEOUT_SECONDS = 30;
 const DEFAULT_AUTO_OPENCODE_TIMEOUT_SECONDS = 300;
@@ -893,7 +894,7 @@ async function commandDaemon(redisConfig: RedisConfig): Promise<void> {
     queueKey,
     syncTokenKey: SYNC_TOKEN_KEY,
     legacySyncTokenKey: LEGACY_SYNC_TOKEN_KEY,
-    managementCommandPrefix: MANAGEMENT_COMMAND_PREFIX,
+    managementCommandPrefixes: MANAGEMENT_COMMAND_PREFIX_ALIASES,
     renderHelp: () => generalHelp(DEFAULT_OPENCODE_COMMAND_PREFIX, MANAGEMENT_COMMAND_PREFIX),
     isStopMessage: (body) => openCodeAdapter.isStopMessage(body),
     requestStopForProject: (projectKey, sender) =>

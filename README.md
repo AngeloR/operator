@@ -1,6 +1,6 @@
 # operator
 
-A Matrix-to-OpenCode bridge that lets you interact with OpenCode (AI coding assistant) directly from Matrix chat rooms.
+A Matrix-to-agent harness bridge that lets you interact with `opencode`, `codex`, or `claude` directly from Matrix chat rooms.
 
 ## Contributing
 
@@ -11,7 +11,7 @@ See `CONTRIBUTING.md` for human and AI contributor workflows, branch/PR expectat
 `operator` is a relay service that:
 
 - Connects to your Matrix homeserver and monitors configured rooms for messages
-- Runs OpenCode to respond to messages automatically using AI
+- Runs per-project harness commands to respond to messages automatically using AI
 - Provides an HTTP API for external agents to send/receive messages via Redis queues
 - Supports in-room CLI commands for checking usage, models, and managing model overrides
 
@@ -32,7 +32,7 @@ flowchart LR
 
 1. **Matrix Ingress**: Messages from configured rooms are queued to Redis (`[project]:user`)
 2. **Matrix Egress**: Agent responses from Redis (`[project]:agent`) are sent to rooms
-3. **Auto OpenCode**: When enabled, automatically runs OpenCode to process user messages
+3. **Harness Workers**: Runs per-project harness execution (`opencode`, `codex`, `claude`)
 4. **HTTP API**: External services can poll/send via `/v1/agent/poll` and `/v1/agent/send`
 
 Inbound attachments are supported for `m.file` and `m.image` events. The router currently allows only:
@@ -112,7 +112,12 @@ You can use these commands directly in Matrix rooms:
 | `!op model <model-id>`            | Set a model override for this project        |
 | `!op model reset`                 | Clear model override (use OpenCode default)  |
 | `!op help`                        | Show command help                            |
+| `!agent help`                     | Harness-aware help (`!op help` alias)        |
 | `stop`                            | Stop the active auto-opencode job            |
+
+Notes:
+- OpenCode projects support in-room CLI commands (`usage`, `stats`, `models`, `model`, `start`).
+- Codex/Claude projects currently run in final-output mode (prompt in, final response out) and do not expose in-room CLI shortcuts yet.
 
 Example:
 
@@ -128,23 +133,25 @@ Use these commands in your configured management room to add/remove/list project
 
 | Command                                                   | Description                      |
 | --------------------------------------------------------- | -------------------------------- |
-| `!op list`                                                | Show all configured projects     |
-| `!op create <name> --room <roomId> --path <dir>`         | Create a new project             |
-| `!op delete <name>`                                       | Delete a project                 |
-| `!op show <name>`                                         | Show one project configuration   |
-| `!op reload`                                              | Reload `config.json` from disk   |
-| `!op help`                                                | Show management command help     |
+| `!agent list`                                             | Show all configured projects     |
+| `!agent create <name> --room <roomId> --path <dir>`      | Create a new project             |
+| `!agent delete <name>`                                    | Delete a project                 |
+| `!agent show <name>`                                      | Show one project configuration   |
+| `!agent reload`                                           | Reload `config.json` from disk   |
+| `!agent help`                                             | Show management command help     |
 
 Examples:
 
 ```text
-!op list
-!op create operator --room !QefzZvtgPwIGrHuOuo:palantir --path /home/xangelo/repos/operator
-!op show operator
-!op reload
+!agent list
+!agent create operator --room !QefzZvtgPwIGrHuOuo:palantir --path /home/xangelo/repos/operator
+!agent show operator
+!agent reload
 ```
 
-When using `!op create`, the sender who runs the command is automatically added to
+`!op` remains supported as a legacy alias in the management room.
+
+When using `!agent create`, the sender who runs the command is automatically added to
 that project's `senderAllowlist`.
 
 ## HTTP API
@@ -203,7 +210,7 @@ curl http://localhost:8888/v1/metrics
 | `prefix`                 | No       | Legacy prefix for message routing                               |
 | `agent`                  | No       | Agent label (default: `opencode`)                               |
 | `command`                | No*      | CLI command to run (*required for `codex`/`claude`; optional for `opencode`) |
-| `commandPrefix`          | No       | In-room command prefix (default: `!op`)                         |
+| `commandPrefix`          | No       | OpenCode in-room command prefix (default: `!op`, alias `!agent`) |
 | `projectWorkingDirectory`| Yes      | Working directory for OpenCode                                  |
 | `senderAllowlist`        | Yes      | Allowed senders (auto-seeded for `!op create` projects)        |
 | `timeoutSeconds`         | No       | Timeout for OpenCode runs (default: 300, 0=disable)             |

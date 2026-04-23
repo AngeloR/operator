@@ -41,6 +41,7 @@ describe("runtime/opencode-adapter", () => {
     const adapter = createAdapter();
     expect(adapter.isStopMessage("stop")).toBe(true);
     expect(adapter.isStopMessage("!stop")).toBe(true);
+    expect(adapter.isStopMessage("!agent stop")).toBe(true);
     expect(adapter.isStopMessage("!op stop")).toBe(true);
     expect(adapter.isStopMessage("continue")).toBe(false);
   });

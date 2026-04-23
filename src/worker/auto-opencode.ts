@@ -67,7 +67,7 @@ export type RunAutoOpenCodeProjectWorkerOptions = {
     markAndCheckDuplicate: (projectDedup: Map<string, number>, eventId: string) => boolean;
     parseAutoOpenCodeCliRequest: (
       body: string,
-      commandPrefix: string,
+      commandPrefixes: string[],
     ) => ParsedAutoOpenCodeCliRequest | null;
     executeAutoOpenCodeCliCommand: (
       request: ParsedAutoOpenCodeCliRequest,
@@ -170,7 +170,7 @@ export async function runAutoOpenCodeProjectWorker(
 
       const cliRequest = deps.parseAutoOpenCodeCliRequest(
         envelope.body,
-        autoProject.commandPrefix,
+        [autoProject.commandPrefix, "!agent", "!op"],
       );
       if (cliRequest) {
         const startedAt = Date.now();

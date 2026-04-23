@@ -24,11 +24,11 @@ Auth for /v1/agent/*:
   Authorization: Bearer <token>
   token source: config.agentApiToken(s) or AGENT_API_TOKEN(S)
 
-Project-level config (all projects run the interactive agent):
+Project-level config:
   harness: "opencode"                                 # opencode|codex|claude (default: opencode)
   agent: "opencode"                                    # optional internal agent label (state/context)
   command: ["opencode","run"]                          # relay enforces JSON stream mode and requires opencode run
-  commandPrefix: "!op"                                 # in-room command prefix for opencode CLI shortcuts
+  commandPrefix: "!op"                                 # opencode CLI prefix (!agent is also accepted)
   allowedCliCommands: ["usage","stats","models","model","start","help"] # command allowlist
   commandTimeoutSeconds: 30                            # timeout for prefixed in-room opencode commands
   timeoutSeconds: 300                                  # timeout per message (0 disables timeout + forces 15m heartbeat)

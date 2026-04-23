@@ -49,6 +49,7 @@ const DEFAULT_AUTO_OPENCODE_CONTEXT_TAIL_LINES = 60;
 const AUTO_OPENCODE_STOP_ALIASES = new Set<string>([
   "stop",
   "!stop",
+  "!agent stop",
   `${DEFAULT_AUTO_OPENCODE_COMMAND_PREFIX} stop`,
 ]);
 const AUTO_OPENCODE_MAX_MESSAGE_CHARS = 16_000;

@@ -31,7 +31,7 @@ export type RunInboundLoopOptions = {
   queueKey: (projectKey: string, direction: QueueDirection) => string;
   syncTokenKey: string;
   legacySyncTokenKey: string;
-  managementCommandPrefix: string;
+  managementCommandPrefixes: string[];
   renderHelp: () => string;
   isStopMessage: (body: string) => boolean;
   requestStopForProject: (projectKey: string, sender: string) => { stopped: boolean; jobId: string | null };
@@ -326,12 +326,17 @@ export async function runInboundLoop(options: RunInboundLoopOptions): Promise<ne
               continue;
             }
 
-            if (!trimmed.startsWith(options.managementCommandPrefix)) continue;
-            const nextChar = trimmed.charAt(options.managementCommandPrefix.length);
-            if (nextChar && !/\s/.test(nextChar)) continue;
+            const matchedManagementPrefix = options.managementCommandPrefixes.find((prefix) => {
+              if (!trimmed.startsWith(prefix)) {
+                return false;
+              }
+              const nextChar = trimmed.charAt(prefix.length);
+              return !(nextChar && !/\s/.test(nextChar));
+            });
+            if (!matchedManagementPrefix) continue;
 
             const tokens = options.splitCommandTokens(
-              trimmed.slice(options.managementCommandPrefix.length).trim(),
+              trimmed.slice(matchedManagementPrefix.length).trim(),
             );
             let response: string;
             try {
@@ -371,6 +376,43 @@ export async function runInboundLoop(options: RunInboundLoopOptions): Promise<ne
 
           const trimmed = body.trim();
           const sender = nonEmptyText(event.sender);
+
+          const normalized = trimmed.toLowerCase();
+          const isHarnessHelpCommand =
+            normalized === "!agent" ||
+            normalized === "!agent help" ||
+            normalized === "!op" ||
+            normalized === "!op help";
+          if (isHarnessHelpCommand) {
+            let response: string;
+            try {
+              response = options.renderHelp();
+            } catch (error: unknown) {
+              const detail = error instanceof Error ? error.message : String(error);
+              response = `Error: ${detail}`;
+            }
+
+            try {
+              await sendToRoom(
+                options.matrixClientConfig(),
+                roomId,
+                buildMatrixContent({ body: response, format: "markdown" }),
+              );
+              logEvent("info", "help.command.executed", {
+                roomId,
+                projectKey: projectKey ?? null,
+                command: normalized,
+              });
+            } catch (error: unknown) {
+              const detail = error instanceof Error ? error.message : String(error);
+              logEvent("error", "help.command.response_failed", {
+                roomId,
+                projectKey: projectKey ?? null,
+                error: detail,
+              });
+            }
+            continue;
+          }
 
           if (
             projectKey &&

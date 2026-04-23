@@ -25,9 +25,9 @@ flowchart LR
 
 1. Runtime bootstraps config, Redis clients, Matrix identity, HTTP facade, and worker loops (`src/index.ts`).
 2. Inbound loop long-polls Matrix `/sync`, filters events, maps room -> project, and enqueues user envelopes to `project:user` (`src/runtime/loops.ts`, `src/runtime/matrix.ts`).
-3. For auto-opencode projects, the project worker consumes `project:user`, enforces sender allowlist/dedup, and either:
-   - executes `!op` project CLI commands (`usage`, `stats`, `models`, `model`, `start`), or
-   - builds context and runs `opencode run` in the project working directory (`src/worker/auto-opencode.ts`, `src/runtime/process.ts`, `src/worker/context-state.ts`).
+3. For harness-backed projects, workers consume `project:user`, enforce sender allowlist/dedup, and then:
+   - **OpenCode harness**: executes in-room OpenCode CLI commands (`!agent`/`!op` for `usage`, `stats`, `models`, `model`, `start`) or runs `opencode run` with streaming-aware handling (`src/worker/auto-opencode.ts`, `src/runtime/process.ts`, `src/worker/context-state.ts`).
+   - **Codex/Claude harnesses**: run configured command in final-output mode and return the final result to `project:agent` (`src/runtime/final-output-adapter.ts`, `src/runtime/harness-worker.ts`).
 4. Worker output is written to `project:agent` as queue envelopes.
 5. Outbound loop consumes `project:agent`, renders Matrix message content (plain/markdown -> HTML), and sends `m.room.message` to the configured room (`src/runtime/loops.ts`, `src/runtime/matrix.ts`).
 
@@ -46,7 +46,7 @@ Authentication for `/v1/agent/*` is Bearer token based (`agentApiToken`/`agentAp
 
 - **Matrix boundary**: only Matrix HTTP APIs are used (`/_matrix/client/v3/*`) for sync/join/send.
 - **Queue boundary**: all cross-component message passing uses Redis list queues with JSON envelopes (`src/runtime/redis.ts`).
-- **Execution boundary**: OpenCode runs as a child process with timeout/abort controls and stream parsing (`src/runtime/process.ts`).
+- **Execution boundary**: harness CLIs run as child processes through adapter contracts; OpenCode adds stream parsing while Codex/Claude currently run final-output mode (`src/runtime/process.ts`, `src/runtime/final-output-adapter.ts`).
 - **Project isolation boundary**: per-project queue keys, working directory, model override, and sender allowlist are enforced from config.
 - **State boundary**: per-project worker state is stored under `.operator-state/<project>/<agent>/` (inbox/outbox logs, rolling summary, current context).
 
@@ -54,7 +54,7 @@ Authentication for `/v1/agent/*` is Bearer token based (`agentApiToken`/`agentAp
 
 - **Matrix homeserver**: source of inbound room events and sink for outbound messages.
 - **Redis**: durable queue transport (`project:user`, `project:agent`) plus sync token storage.
-- **OpenCode CLI**: executes autonomous coding tasks for auto-opencode projects.
+- **Harness CLIs**: `opencode`, `codex`, and/or `claude` execute autonomous coding tasks based on project harness selection.
 - **Bun runtime**: hosts HTTP server, Redis client, and long-running loops.
 
 ## Runtime Components
@@ -64,7 +64,9 @@ Authentication for `/v1/agent/*` is Bearer token based (`agentApiToken`/`agentAp
 - `src/runtime/matrix.ts`: Matrix API client helpers and event/content transformations.
 - `src/runtime/loops.ts`: inbound `/sync` ingestion and outbound queue-to-Matrix delivery loops.
 - `src/runtime/http.ts`: operator HTTP facade for health, metrics, and external agent APIs.
-- `src/worker/auto-opencode.ts`: per-project worker + supervisor lifecycle.
+- `src/worker/auto-opencode.ts`: OpenCode worker + supervisor lifecycle.
+- `src/runtime/harness.ts`: harness adapter interface/registry/resolution.
+- `src/runtime/harness-worker.ts`: final-output worker + supervisor for non-OpenCode harnesses.
 - `src/runtime/process.ts`: process execution and OpenCode stream handling.
 - `src/worker/context-state.ts`: rolling context files used to build each OpenCode prompt.
-- `src/commands/management.ts` and `src/commands/opencode-cli.ts`: management-room and project-room command handlers.
+- `src/commands/management.ts` and `src/commands/opencode-cli.ts`: management-room and OpenCode project-room command handlers.

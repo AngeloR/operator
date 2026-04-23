@@ -1,7 +1,11 @@
-export function renderManagementCommandHelp(commandPrefix: string): string {
+export function renderManagementCommandHelp(
+  commandPrefix: string,
+  legacyPrefix = "!op",
+): string {
   return [
     "Project management commands:",
     "(run these in the management room)",
+    `Primary prefix: ${commandPrefix} (legacy alias: ${legacyPrefix})`,
     "",
     `- ${commandPrefix} list`,
     "  Show all configured projects",

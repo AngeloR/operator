@@ -12,7 +12,7 @@ Responsibility split:
 - `src/runtime/process.ts`: command process execution, OpenCode run command preparation, and stream-to-output parsing.
 - `src/worker/auto-opencode.ts`: auto-opencode project worker and supervisor loop implementations.
 - `src/worker/context-state.ts`: auto-opencode state directory/log I/O plus rolling-summary/current-context builders.
-- `src/commands/management.ts`: management-room `!op` command parsing/help/execution.
-- `src/commands/opencode-cli.ts`: project-room `!op` CLI parsing/help/execution for usage/stats/models/model/start.
+- `src/commands/management.ts`: management-room `!agent` command parsing/help/execution (`!op` kept as legacy alias).
+- `src/commands/opencode-cli.ts`: project-room OpenCode CLI command parsing/help (`!agent`/`!op`) for usage/stats/models/model/start.
 
 This keeps `src/index.ts` focused on command flow, top-level wiring, and process lifecycle while preserving external behavior.
