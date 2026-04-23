@@ -17,6 +17,8 @@ See `CONTRIBUTING.md` for human and AI contributor workflows, branch/PR expectat
 
 Architecture reference: [`ARCHITECTURE.md`](ARCHITECTURE.md)
 
+Multi-harness rollout reference: [`docs/multi-harness-rollout.md`](docs/multi-harness-rollout.md)
+
 ## How It Works
 
 ```mermaid
@@ -32,6 +34,12 @@ flowchart LR
 2. **Matrix Egress**: Agent responses from Redis (`[project]:agent`) are sent to rooms
 3. **Auto OpenCode**: When enabled, automatically runs OpenCode to process user messages
 4. **HTTP API**: External services can poll/send via `/v1/agent/poll` and `/v1/agent/send`
+
+Inbound attachments are supported for `m.file` and `m.image` events. The router currently allows only:
+- text files with `.txt` or `.md` extensions
+- image attachments
+
+Allowed attachments are downloaded to local temp storage and included in the polled queue message as `message.attachments[]` with metadata such as `filename`, `kind`, `mimeType`, `sizeBytes`, `localPath`, and `downloadStatus`.
 
 ## Installation
 
@@ -70,6 +78,7 @@ cp config.example.json config.json
   "projects": {
     "my-project": {
       "roomId": "!abc123:matrix.org",
+      "harness": "opencode",
       "projectWorkingDirectory": "/path/to/your/codebase",
       "senderAllowlist": ["@you:matrix.org"]
     }
@@ -184,6 +193,7 @@ curl http://localhost:8888/v1/metrics
 | Key                      | Required | Description                                                     |
 | ------------------------ | -------- | --------------------------------------------------------------- |
 | `roomId`                 | Yes      | Matrix room ID                                                  |
+| `harness`                | No       | Harness selector: `opencode`, `codex`, or `claude` (default: `opencode`) |
 | `prefix`                 | No       | Legacy prefix for message routing                               |
 | `agent`                  | No       | Agent label (default: `opencode`)                               |
 | `command`                | No       | Command to run (default: `["opencode", "run"]`)                 |
@@ -217,6 +227,8 @@ bun run src/index.ts poll-user my-project --block 30
 
 - **Sync State**: Matrix sync position stored at Redis key `operator:sync:next-batch:v1`
 - **Message Format**: Outbound messages support Markdown, converted to Matrix HTML
+- **Large Responses**: Outbound messages over ~12 KiB are split into threaded parts with `[Part x/y | event-id]` headers (8 KiB chunk target)
+- **Attachment Allowlist**: Inbound attachments accept only `.txt`, `.md`, and image types
 - **Security**: `command` runs with the process's permissions - treat as privileged config
 - **Legacy**: `autoCodex*` and `autoOpenCode*` config keys are no longer supported
 

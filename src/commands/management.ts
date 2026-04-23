@@ -160,7 +160,7 @@ export async function executeManagementCommand(
 
     const lines: string[] = ["Configured projects:", ""];
     for (const [key, project] of Object.entries(currentProjects)) {
-      lines.push(`- ${key}: ${project.roomId}`);
+      lines.push(`- ${key}: ${project.roomId} (harness: ${project.harness ?? "opencode"})`);
       if (project.projectWorkingDirectory) {
         lines.push(`  working directory: ${project.projectWorkingDirectory}`);
       }
@@ -212,6 +212,7 @@ export async function executeManagementCommand(
 
     const newProject: ProjectConfig = {
       roomId: command.roomId,
+      harness: "opencode",
       projectWorkingDirectory: command.projectWorkingDirectory,
       senderAllowlist: buildInitialSenderAllowlist(senderUserId),
       command: ["opencode", "run", "--format", "json"],

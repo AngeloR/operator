@@ -11,6 +11,7 @@
     },
     "operator": {
       "roomId": "!yourOtherRoomId:your-server",
+      "harness": "opencode",
       "agent": "opencode",
       "model": "opencode/minimax-m2.5-free",
       "command": ["opencode", "run"],

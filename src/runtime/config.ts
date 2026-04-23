@@ -3,6 +3,7 @@ import { nonEmptyText } from "../text";
 
 export type ProjectConfig = {
   roomId: string;
+  harness?: Harness;
   prefix?: string;
   agent?: string;
   model?: string;
@@ -21,6 +22,27 @@ export type ProjectConfig = {
   progressTemplate?: string;
   contextTailLines?: number;
 };
+
+export type Harness = "opencode" | "codex" | "claude";
+
+const VALID_HARNESSES: Harness[] = ["opencode", "codex", "claude"];
+
+export function parseProjectHarness(value: unknown, projectKey: string): Harness {
+  if (value === undefined) {
+    return "opencode";
+  }
+
+  const parsed = nonEmptyText(value)?.toLowerCase();
+  if (!parsed || !VALID_HARNESSES.includes(parsed as Harness)) {
+    throw new Error(
+      `project "${projectKey}" has invalid harness: expected one of ${VALID_HARNESSES.join(
+        ", ",
+      )}`,
+    );
+  }
+
+  return parsed as Harness;
+}
 
 export type AppConfig = {
   homeserverUrl: string;
@@ -162,11 +184,21 @@ export async function loadConfig(configPath: string, cfg: AppConfig): Promise<Re
   }
 
   const projectsObj = readProjectsObject(configObject);
+  const normalizedProjects: Record<string, ProjectConfig> = {};
+  for (const [projectKey, project] of Object.entries(projectsObj)) {
+    if (typeof project !== "object" || project === null || Array.isArray(project)) {
+      throw new Error(`project "${projectKey}" must be a JSON object`);
+    }
+
+    const projectConfig = { ...(project as ProjectConfig) };
+    projectConfig.harness = parseProjectHarness(projectConfig.harness, projectKey);
+    normalizedProjects[projectKey] = projectConfig;
+  }
 
   cfg.homeserverUrl = configObject.homeserverUrl as string;
   cfg.accessToken = configObject.accessToken as string;
   cfg.port = configObject.port as number | undefined;
-  cfg.projects = projectsObj as Record<string, ProjectConfig>;
+  cfg.projects = normalizedProjects;
   cfg.adminUserIds = configObject.adminUserIds as string[] | undefined;
   cfg.managementRoomId = configObject.managementRoomId as string | undefined;
   cfg.agentApiToken = configObject.agentApiToken as string | undefined;

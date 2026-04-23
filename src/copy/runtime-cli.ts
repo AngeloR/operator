@@ -25,6 +25,7 @@ Auth for /v1/agent/*:
   token source: config.agentApiToken(s) or AGENT_API_TOKEN(S)
 
 Project-level config (all projects run the interactive agent):
+  harness: "opencode"                                 # opencode|codex|claude (default: opencode)
   agent: "opencode"                                    # optional internal agent label (state/context)
   command: ["opencode","run"]                          # relay enforces JSON stream mode and requires opencode run
   commandPrefix: "!op"                                 # in-room command prefix for opencode CLI shortcuts

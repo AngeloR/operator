@@ -51,6 +51,7 @@ import {
 } from "./runtime/matrix";
 import { startHttpFacade } from "./runtime/http";
 import { runInboundLoop, runOutboundLoop } from "./runtime/loops";
+import { resolveProjectHarnessAdapter } from "./runtime/harness";
 import {
   runAutoOpenCodeProjectSupervisor,
   runAutoOpenCodeProjectWorker,
@@ -416,10 +417,16 @@ function renderTemplate(
   );
 }
 
-function buildAutoOpenCodeMap(): Map<string, AutoOpenCodeProject> {
+function buildAutoOpenCodeMap(
+  eligibleProjectKeys?: Set<string>,
+): Map<string, AutoOpenCodeProject> {
   const map = new Map<string, AutoOpenCodeProject>();
 
   for (const [projectKey, project] of Object.entries(projects)) {
+    if (eligibleProjectKeys && !eligibleProjectKeys.has(projectKey)) {
+      continue;
+    }
+
     assertNoLegacyConfig(projectKey, project);
 
     const roomId = nonEmptyText(project.roomId);
@@ -764,10 +771,18 @@ async function commandDaemon(redisConfig: RedisConfig): Promise<void> {
     logEvent("warn", "config.room.duplicate", payload);
   });
   const queueToProject = new Map<string, string>();
+  const opencodeProjectKeys = new Set<string>();
+
   for (const [projectKey] of Object.entries(projects)) {
+    const project = resolveProject(projects, projectKey);
+    const adapter = resolveProjectHarnessAdapter(projectKey, project);
+    if (adapter.harness === "opencode") {
+      opencodeProjectKeys.add(projectKey);
+    }
     queueToProject.set(queueKey(projectKey, "agent"), projectKey);
   }
-  const autoOpenCodeQueueToProject = buildAutoOpenCodeMap();
+
+  const autoOpenCodeQueueToProject = buildAutoOpenCodeMap(opencodeProjectKeys);
   const autoOpenCodeProjectKeys = new Set(
     [...autoOpenCodeQueueToProject.values()].map((item) => item.projectKey),
   );
