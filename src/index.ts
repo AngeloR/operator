@@ -53,6 +53,10 @@ import { startHttpFacade } from "./runtime/http";
 import { runInboundLoop, runOutboundLoop } from "./runtime/loops";
 import { resolveProjectHarnessAdapter } from "./runtime/harness";
 import {
+  DEFAULT_OPENCODE_COMMAND_PREFIX,
+  OpenCodeAdapter,
+} from "./runtime/opencode-adapter";
+import {
   runAutoOpenCodeProjectSupervisor,
   runAutoOpenCodeProjectWorker,
   type ActiveAutoOpenCodeRun,
@@ -767,6 +771,15 @@ function resolvePort(): number {
 }
 
 async function commandDaemon(redisConfig: RedisConfig): Promise<void> {
+  const openCodeAdapter = new OpenCodeAdapter({
+    configPath: CONFIG_JSON_PATH,
+    appConfig: cfg,
+    getProjects: () => projects,
+    setProjects: (nextProjects) => {
+      projects = nextProjects;
+    },
+  });
+
   const roomToProject = buildRoomToProjectMap(projects, (payload) => {
     logEvent("warn", "config.room.duplicate", payload);
   });
@@ -782,11 +795,14 @@ async function commandDaemon(redisConfig: RedisConfig): Promise<void> {
     queueToProject.set(queueKey(projectKey, "agent"), projectKey);
   }
 
-  const autoOpenCodeQueueToProject = buildAutoOpenCodeMap(opencodeProjectKeys);
+  const autoOpenCodeQueueToProject = openCodeAdapter.buildProjectsByQueue(
+    projects,
+    opencodeProjectKeys,
+  );
   const autoOpenCodeProjectKeys = new Set(
     [...autoOpenCodeQueueToProject.values()].map((item) => item.projectKey),
   );
-  await validateAutoOpenCodeProjects(autoOpenCodeQueueToProject);
+  await openCodeAdapter.validateProjects(autoOpenCodeQueueToProject);
 
   if (queueToProject.size === 0) {
     throw new Error("no projects configured in config.json");
@@ -866,9 +882,10 @@ async function commandDaemon(redisConfig: RedisConfig): Promise<void> {
     syncTokenKey: SYNC_TOKEN_KEY,
     legacySyncTokenKey: LEGACY_SYNC_TOKEN_KEY,
     managementCommandPrefix: MANAGEMENT_COMMAND_PREFIX,
-    renderHelp: () => generalHelp(DEFAULT_AUTO_OPENCODE_COMMAND_PREFIX, MANAGEMENT_COMMAND_PREFIX),
-    isStopMessage,
-    requestStopForProject,
+    renderHelp: () => generalHelp(DEFAULT_OPENCODE_COMMAND_PREFIX, MANAGEMENT_COMMAND_PREFIX),
+    isStopMessage: (body) => openCodeAdapter.isStopMessage(body),
+    requestStopForProject: (projectKey, sender) =>
+      openCodeAdapter.requestStopForProject(projectKey, sender),
     splitCommandTokens,
     parseManagementCommandArgs,
     executeManagementCommand: async (parsed: unknown, sender: string) => {
@@ -906,63 +923,7 @@ async function commandDaemon(redisConfig: RedisConfig): Promise<void> {
       restartMaxDelayMs: AUTO_OPENCODE_WORKER_RESTART_MAX_DELAY_MS,
       createRedisClient,
       runWorker: (workerRedis, queue, project) =>
-        runAutoOpenCodeProjectWorker({
-          autoOpenCodeRedis: workerRedis,
-          userQueue: queue,
-          autoProject: project,
-          constants: {
-            maxMessageChars: AUTO_OPENCODE_MAX_MESSAGE_CHARS,
-            maxContextChars: AUTO_OPENCODE_MAX_CONTEXT_CHARS,
-            infiniteTimeoutHeartbeatMs: AUTO_OPENCODE_INFINITE_TIMEOUT_HEARTBEAT_MS,
-            streamUpdateMinIntervalMs: AUTO_OPENCODE_STREAM_UPDATE_MIN_INTERVAL_MS,
-            streamUpdateMinChars: AUTO_OPENCODE_STREAM_UPDATE_MIN_CHARS,
-            streamPreviewMaxChars: AUTO_OPENCODE_STREAM_PREVIEW_MAX_CHARS,
-          },
-          deps: {
-            parseEnvelope,
-            queueKey,
-            markAndCheckDuplicate,
-            parseAutoOpenCodeCliRequest,
-            executeAutoOpenCodeCliCommand: async (request, cliProject) => {
-              const result = await executeAutoOpenCodeCliCommand({
-                request,
-                autoProject: cliProject,
-                configPath: CONFIG_JSON_PATH,
-                appConfig: cfg,
-                currentProjects: projects,
-                maxContextChars: AUTO_OPENCODE_MAX_CONTEXT_CHARS,
-                runCommandWithInput: async (command, cwd, input, timeoutMs) =>
-                  runCommandWithInput(command, cwd, input, timeoutMs),
-              });
-              projects = result.projects;
-              return result.response;
-            },
-            enqueueAutoOpenCodeMessage,
-            enqueueAutoOpenCodeStatus,
-            prepareAutoOpenCodeContext: (envelope, contextProject, jobId) =>
-              prepareAutoOpenCodeContext(envelope, contextProject, jobId, {
-                maxMessageChars: AUTO_OPENCODE_MAX_MESSAGE_CHARS,
-                maxContextChars: AUTO_OPENCODE_MAX_CONTEXT_CHARS,
-              }),
-            isOpenCodeRunCommand,
-            runAutoOpenCodePrompt,
-            appendTurnLog,
-            setActiveRun: (projectKey, run) => {
-              activeAutoOpenCodeRuns.set(projectKey, run);
-            },
-            getStopRequestedBy: (projectKey) => {
-              const activeRun = activeAutoOpenCodeRuns.get(projectKey);
-              return activeRun?.stopRequestedBy ?? null;
-            },
-            clearActiveRun: (projectKey, jobId) => {
-              const activeRun = activeAutoOpenCodeRuns.get(projectKey);
-              if (activeRun?.jobId === jobId) {
-                activeAutoOpenCodeRuns.delete(projectKey);
-              }
-            },
-            isStoppedError: (error: unknown): boolean => error instanceof AutoOpenCodeStoppedError,
-          },
-        }),
+        openCodeAdapter.runProjectWorker(workerRedis, queue, project),
     }).catch(
       (error: unknown) => {
         const detail = error instanceof Error ? error.message : String(error);
