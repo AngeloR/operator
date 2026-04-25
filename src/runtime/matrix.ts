@@ -15,13 +15,27 @@ export type ParsedMessage = {
   agent?: string;
 };
 
-export type MatrixMessageContent = {
+type MatrixTextMessageContent = {
   msgtype: "m.text";
   body: string;
   format: "org.matrix.custom.html";
   formatted_body: string;
   "m.relates_to"?: MatrixThreadRelation;
 };
+
+type MatrixFileMessageContent = {
+  msgtype: "m.file";
+  body: string;
+  url: string;
+  filename?: string;
+  info?: {
+    mimetype?: string;
+    size?: number;
+  };
+  "m.relates_to"?: MatrixThreadRelation;
+};
+
+export type MatrixMessageContent = MatrixTextMessageContent | MatrixFileMessageContent;
 
 export type MatrixThreadRelation = {
   rel_type: "m.thread";
@@ -251,7 +265,7 @@ export function buildThreadRelation(rootEventId: string): MatrixThreadRelation {
 export function buildMatrixContent(
   message: ParsedMessage,
   relatesTo?: MatrixThreadRelation,
-): MatrixMessageContent {
+): MatrixTextMessageContent {
   const formattedBody =
     message.format === "markdown"
       ? toMarkdownHtml(message.body)
@@ -264,6 +278,74 @@ export function buildMatrixContent(
     formatted_body: formattedBody,
     ...(relatesTo ? { "m.relates_to": relatesTo } : {}),
   };
+}
+
+type MatrixMediaUploadResponse = {
+  content_uri?: unknown;
+};
+
+function attachmentFilenameForMessage(messageId: string, format: MessageFormat): string {
+  const ext = format === "markdown" ? "md" : "txt";
+  const safeId = messageId.replace(/[^a-zA-Z0-9._-]/g, "_");
+  const base = nonEmptyText(safeId) ?? crypto.randomUUID();
+  return `agent-response-${base}.${ext}`;
+}
+
+async function uploadMatrixMedia(
+  cfg: MatrixClientConfig,
+  data: Uint8Array,
+  filename: string,
+  mimeType: string,
+): Promise<string> {
+  const url = new URL("/_matrix/media/v3/upload", cfg.homeserverUrl);
+  url.searchParams.set("filename", filename);
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${cfg.accessToken}`,
+      "content-type": mimeType,
+    },
+    body: data,
+  });
+
+  const payload = await readJsonOrNull(response);
+  if (!response.ok) {
+    throwMatrixHttpError(response, payload, `media upload failed: HTTP ${response.status} ${response.statusText}`);
+  }
+
+  const contentUri = nonEmptyText((payload as MatrixMediaUploadResponse | null)?.content_uri);
+  if (!contentUri) {
+    throw new Error("media upload response missing content_uri");
+  }
+
+  return contentUri;
+}
+
+export async function sendLargeMessageAsAttachment(
+  cfg: MatrixClientConfig,
+  roomId: string,
+  message: ParsedMessage,
+  messageId: string,
+  relatesTo?: MatrixThreadRelation,
+): Promise<string> {
+  const filename = attachmentFilenameForMessage(messageId, message.format);
+  const mimeType =
+    message.format === "markdown" ? "text/markdown; charset=utf-8" : "text/plain; charset=utf-8";
+  const data = UTF8_ENCODER.encode(message.body);
+  const mxcUrl = await uploadMatrixMedia(cfg, data, filename, mimeType);
+
+  return sendToRoom(cfg, roomId, {
+    msgtype: "m.file",
+    body: filename,
+    filename,
+    url: mxcUrl,
+    info: {
+      mimetype: mimeType,
+      size: data.length,
+    },
+    ...(relatesTo ? { "m.relates_to": relatesTo } : {}),
+  });
 }
 
 async function readJsonOrNull(response: Response): Promise<unknown> {
@@ -384,6 +466,19 @@ export async function joinMatrixRoom(
     {},
   );
   return nonEmptyText(joined.room_id) ?? undefined;
+}
+
+export async function sendReadReceipt(
+  cfg: MatrixClientConfig,
+  roomId: string,
+  eventId: string,
+  receiptType: "m.read" | "m.read.private" = "m.read",
+): Promise<void> {
+  await matrixPost<unknown>(
+    cfg,
+    `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/receipt/${encodeURIComponent(receiptType)}/${encodeURIComponent(eventId)}`,
+    {},
+  );
 }
 
 function normalizeMatrixMsgType(value: unknown): MatrixMessageType | null {

@@ -4,6 +4,8 @@ import {
   buildMatrixContent,
   buildThreadRelation,
   joinMatrixRoom,
+  sendReadReceipt,
+  sendLargeMessageAsAttachment,
   sendToRoom,
   splitMessageBodyForMatrix,
   syncMatrix,
@@ -89,6 +91,17 @@ export async function runOutboundLoop(options: RunOutboundLoopOptions): Promise<
               agent: envelope.agent,
             }),
           );
+        } else if (bodyBytes > MATRIX_LARGE_MESSAGE_BYTES) {
+          eventId = await sendLargeMessageAsAttachment(
+            options.matrixClientConfig(),
+            envelope.roomId,
+            {
+              body: envelope.body,
+              format: envelope.format,
+              agent: envelope.agent,
+            },
+            envelope.id,
+          );
         } else {
           const chunks = splitMessageBodyForMatrix(envelope.body, MATRIX_CHUNK_MAX_BYTES);
           chunkCount = chunks.length;
@@ -115,19 +128,6 @@ export async function runOutboundLoop(options: RunOutboundLoopOptions): Promise<
               rootEventId = chunkEventId;
               eventId = chunkEventId;
             }
-          }
-
-          if (bodyBytes > MATRIX_LARGE_MESSAGE_BYTES) {
-            logEvent("info", "outbound.send.chunked.large", {
-              projectKey,
-              queue: poppedQueue,
-              sender: envelope.sender ?? null,
-              roomId: envelope.roomId,
-              queuedEventId: envelope.id,
-              bodyBytes,
-              chunkCount,
-              note: "attachment fallback not configured; delivered as chunks",
-            });
           }
         }
 
@@ -530,6 +530,23 @@ export async function runInboundLoop(options: RunInboundLoopOptions): Promise<ne
 
           if (!envelope) {
             continue;
+          }
+
+          try {
+            await sendReadReceipt(options.matrixClientConfig(), roomId, envelope.id);
+            logEvent("info", "inbound.receipt.sent", {
+              projectKey,
+              roomId,
+              eventId: envelope.id,
+            });
+          } catch (error: unknown) {
+            const detail = error instanceof Error ? error.message : String(error);
+            logEvent("error", "inbound.receipt.failed", {
+              projectKey,
+              roomId,
+              eventId: envelope.id,
+              error: detail,
+            });
           }
 
           const key = options.queueKey(projectKey, "user");

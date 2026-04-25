@@ -5,6 +5,8 @@ import { join } from "node:path";
 import {
   buildMatrixContent,
   buildThreadRelation,
+  sendReadReceipt,
+  sendLargeMessageAsAttachment,
   splitMessageBodyForMatrix,
   toUserQueueEnvelope,
   utf8ByteLength,
@@ -184,6 +186,96 @@ describe("runtime/matrix", () => {
     } finally {
       globalThis.fetch = originalFetch;
       await rm(attachmentDir, { recursive: true, force: true });
+    }
+  });
+
+  test("sendLargeMessageAsAttachment uploads media and sends m.file event", async () => {
+    const fetchCalls: Array<{ path: string; method: string }> = [];
+    const originalFetch = globalThis.fetch;
+    let sentEventBody: Record<string, unknown> | null = null;
+
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const url = input instanceof URL ? input : new URL(typeof input === "string" ? input : input.url);
+      fetchCalls.push({ path: `${url.pathname}${url.search}`, method: init?.method ?? "GET" });
+
+      if (url.pathname === "/_matrix/media/v3/upload") {
+        const uploadBody = init?.body;
+        expect(uploadBody).toBeInstanceOf(Uint8Array);
+        expect(url.searchParams.get("filename")).toBe("agent-response-queue_123.md");
+        return new Response(JSON.stringify({ content_uri: "mxc://example.org/upload123" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+
+      if (url.pathname.includes("/send/m.room.message/")) {
+        sentEventBody = JSON.parse(String(init?.body));
+        return new Response(JSON.stringify({ event_id: "$event-upload" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+
+      return new Response("not found", { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      const eventId = await sendLargeMessageAsAttachment(
+        { homeserverUrl: "https://matrix.example", accessToken: "token" },
+        "!room:example.org",
+        { body: "# Big markdown payload", format: "markdown" },
+        "queue/123",
+      );
+
+      expect(eventId).toBe("$event-upload");
+      expect(fetchCalls).toHaveLength(2);
+      expect(fetchCalls[0]).toEqual({
+        path: "/_matrix/media/v3/upload?filename=agent-response-queue_123.md",
+        method: "POST",
+      });
+      expect(fetchCalls[1]?.method).toBe("PUT");
+      expect(sentEventBody).not.toBeNull();
+      expect(String(sentEventBody?.["msgtype"])).toBe("m.file");
+      expect(String(sentEventBody?.["url"])).toBe("mxc://example.org/upload123");
+      expect(String(sentEventBody?.["body"])).toBe("agent-response-queue_123.md");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("sendReadReceipt posts m.read receipt for event", async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchCalls: Array<{ path: string; method: string; body: string | undefined }> = [];
+
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const url = input instanceof URL ? input : new URL(typeof input === "string" ? input : input.url);
+      fetchCalls.push({
+        path: url.pathname,
+        method: init?.method ?? "GET",
+        body: typeof init?.body === "string" ? init.body : undefined,
+      });
+
+      return new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    try {
+      await sendReadReceipt(
+        { homeserverUrl: "https://matrix.example", accessToken: "token" },
+        "!room:example.org",
+        "$event:example.org",
+      );
+
+      expect(fetchCalls).toHaveLength(1);
+      expect(fetchCalls[0]).toEqual({
+        path: "/_matrix/client/v3/rooms/!room%3Aexample.org/receipt/m.read/%24event%3Aexample.org",
+        method: "POST",
+        body: "{}",
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
     }
   });
 });
