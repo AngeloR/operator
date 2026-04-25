@@ -35,6 +35,8 @@ flowchart LR
 3. **Harness Workers**: Runs per-project harness execution (`opencode`, `codex`, `claude`)
 4. **HTTP API**: External services can poll/send via `/v1/agent/poll` and `/v1/agent/send`
 
+Before an inbound message is enqueued for agent processing, operator sends a Matrix read receipt (`m.read`) for that event so clients can show it as seen as early as possible.
+
 Inbound attachments are supported for `m.file` and `m.image` events. The router currently allows only:
 - text files with `.txt` or `.md` extensions
 - image attachments
@@ -240,7 +242,11 @@ bun run src/index.ts poll-user my-project --block 30
 
 - **Sync State**: Matrix sync position stored at Redis key `operator:sync:next-batch:v1`
 - **Message Format**: Outbound messages support Markdown, converted to Matrix HTML
-- **Large Responses**: Outbound messages over ~12 KiB are split into threaded parts with `[Part x/y | event-id]` headers (8 KiB chunk target)
+- **Large Responses**:
+  - <= ~12 KiB: sent as a normal Matrix text event
+  - > ~12 KiB and <= ~40 KiB: split into threaded parts with `[Part x/y | event-id]` headers (8 KiB chunk target)
+  - > ~40 KiB: uploaded as a text attachment (`m.file`) instead of being posted inline
+- **Read Receipts**: Inbound accepted messages trigger an immediate `m.read` receipt before enqueue/dispatch
 - **Attachment Allowlist**: Inbound attachments accept only `.txt`, `.md`, and image types
 - **Security**: `command` runs with the process's permissions - treat as privileged config
 - **Legacy**: `autoCodex*` and `autoOpenCode*` config keys are no longer supported
